@@ -305,94 +305,131 @@ class GameMaster:
                 ),
             }
 
-    def _handle_dialogue(self, user_input: str) -> str:
-        """处理对话意图 — 完整对话管线。
+    # ------------------------------------------------------------------
+    #  GM & Character agents (split)
+    # ------------------------------------------------------------------
 
-        步骤
-        ----
-        0. 硬编码匹配行动 → 触发检定（无匹配则跳过）
-        1. 执行检定（Python，复用 check.py）
-        2. 检索记忆 + 知识
-        3. 组装 system prompt（人格 + 检定结果 + 状态 + 知识 + 记忆）
-        4. 组装 messages（最近历史）
-        5. 调用 LLM.chat()（一次完成旁白+角色对话）
-        6. 关键词触发状态更新 + 检定失败扣体力
-        7. 记录记忆
-        8. 更新对话历史
+    _GM_SYSTEM = (
+        "你是TRPG的 **Game Master (地下城主)**。"
+        "根据玩家输入和检定结果，用第三人称进行场景叙述。"
+        "你可以描述环境氛围、动作过程、以及检定结果的戏剧化展现。"
+        "不要以角色身份说话。直接叙述，不加前缀。"
+        "每次不超过80字。"
+    )
+
+    def _call_gm(
+        self,
+        user_input: str,
+        check_result: dict | None,
+        knowledge: list[str],
+        memories: list[dict],
+    ) -> str:
+        """GM Agent: 叙述场景和检定结果。"""
+        # 无检定且无知识/记忆触发 → 不需要 GM 旁白
+        if not check_result and not knowledge and not memories:
+            return ""
+
+        gm_parts = [self._GM_SYSTEM]
+
+        # 上下文给 GM
+        gm_parts.append(f"角色: {self.character.name}，{self.character.personality['tone']}")
+        state = self.state.get_state()
+
+        if check_result:
+            gm_parts.append(f"\n检定结果:\n{check_result['narrative']}")
+        if knowledge:
+            gm_parts.append(f"\n相关知识:\n" + "\n".join(knowledge[:2]))
+        if memories:
+            gm_parts.append(f"\n最近事件:\n" + "\n".join(m["content"] for m in memories[:2]))
+
+        gm_system = "\n".join(gm_parts)
+        gm_messages = [{"role": "user", "content": f"玩家行动: {user_input}"}]
+
+        if self._llm_available and self.llm:
+            try:
+                return self.llm.chat(system=gm_system, messages=gm_messages)
+            except Exception:
+                return ""
+        return ""
+
+    def _handle_dialogue(self, user_input: str) -> str:
+        """处理对话意图 — 双 Agent 管线。
+
+        GM Agent: 场景叙述 + 检定结果
+        角色 Agent: 以角色身份说话
         """
+        name = self.character.name
+
         # ---- Step 0: 硬编码匹配行动 ----
         action = self._match_action(user_input)
 
-        # ---- Step 1: 执行检定（仅当匹配到行动时） ----
+        # ---- Step 1: 执行检定 ----
         check_result = None
         if action:
             check_result = self._execute_check(action)
 
         # ---- Step 2: 检索 ----
         memories = self.memory.full_retrieve(user_input)
-        knowledge = self.knowledge.query(user_input, self.character.name)
+        knowledge = self.knowledge.query(user_input, name)
 
-        # ---- Step 3: 组装 system prompt ----
-        system_parts: List[str] = [
+        # ---- Step 3: GM Agent 叙述 ----
+        gm_narration = self._call_gm(user_input, check_result, knowledge, memories)
+
+        # ---- Step 4: 角色 Agent ----
+        char_parts: List[str] = [
             self.character.build_personality_prompt(),
             self.character.build_state_prompt(self.state.get_state()),
         ]
 
-        # 检定结果 → GM 叙述指令
-        if check_result:
-            system_parts.append(
-                "## GM 检定结果\n"
-                f"{check_result['narrative']}\n\n"
-                "请在回复中用第三人称叙述这个行动的过程和结果，空行后以角色身份说话。\n"
-                "检定成功 → 描述动作利落完成\n"
-                "检定失败 → 描述动作失败或遭遇困难"
-            )
-        else:
-            system_parts.append(
-                "## 纯对话模式\n"
-                "玩家在进行对话或社交，不需要旁白叙述。直接以角色身份回应。"
-            )
-
         if knowledge:
-            system_parts.append("【相关知识】")
-            system_parts.extend(knowledge)
-
+            char_parts.append("【相关知识】")
+            char_parts.extend(knowledge)
         if memories:
-            system_parts.append("【相关记忆】")
+            char_parts.append("【相关记忆】")
             for mem in memories[:3]:
-                system_parts.append(f"- {mem['content']}")
+                char_parts.append(f"- {mem['content']}")
 
-        system_prompt = "\n\n".join(system_parts)
+        char_prompt = "\n\n".join(char_parts)
+        char_messages: List[Dict[str, str]] = list(self.history)
 
-        # ---- Step 4: 组装 messages ----
-        messages: List[Dict[str, str]] = list(self.history)
-        messages.append({"role": "user", "content": user_input})
+        if gm_narration:
+            char_prompt += (
+                f"\n\n## GM旁白\n"
+                f"{gm_narration}\n\n"
+                f"请根据GM的叙述，以{name}的身份回应玩家。"
+            )
 
-        # ---- Step 5: 调用 LLM ----
+        char_messages.append({"role": "user", "content": user_input})
+
         if self._llm_available and self.llm is not None:
             try:
-                response = self.llm.chat(system=system_prompt, messages=messages)
+                char_reply = self.llm.chat(system=char_prompt, messages=char_messages)
             except Exception:
-                response = "LLM 模块尚未实现"
+                char_reply = "LLM 模块尚未实现"
         else:
-            response = "LLM 模块尚未实现"
+            char_reply = "LLM 模块尚未实现"
 
-        # ---- Step 6: 状态更新 ----
-        combined = f"{user_input} {response}"
+        # ---- 组装输出 ----
+        if gm_narration:
+            response = f"[GM]: {gm_narration}\n\n[{name}]: {char_reply}"
+        else:
+            response = f"[{name}]: {char_reply}"
+
+        # ---- Step 5: 状态更新 ----
+        combined = f"{user_input} {gm_narration} {char_reply}"
         for trigger, keywords in _KEYWORD_TRIGGERS.items():
             for kw in keywords:
                 if kw in combined:
                     self.state.apply(trigger)
                     break
-        # 检定失败 → 消耗体力
         if check_result and check_result.get("stamina_cost"):
             self.state.apply("combat")
 
-        # ---- Step 7: 记录记忆 ----
+        # ---- Step 6: 记录记忆 ----
         if self._llm_available and self.llm is not None:
             try:
                 extracted = self.llm.extract_memory(
-                    f"用户：{user_input}\n你：{response}"
+                    f"用户：{user_input}\n{name}：{char_reply}"
                 )
             except Exception:
                 extracted = ""
@@ -405,12 +442,11 @@ class GameMaster:
                 context={"emotion": self.state.get_state()["emotion"]},
             )
 
-        # ---- Step 8: 更新对话历史 ----
+        # ---- Step 7: 更新对话历史 ----
         self.history.append({"role": "user", "content": user_input})
         self.history.append({"role": "assistant", "content": response})
 
         if len(self.history) > self.max_history * 2:
-            # TODO: 摘要压缩旧历史，而不是直接丢弃
             self.history = self.history[-self.max_history * 2 :]
 
         return response
