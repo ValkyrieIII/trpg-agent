@@ -27,3 +27,6 @@ venv/
 *.log
 .DS_Store
 Thumbs.db
+
+# Git 工作树
+.worktrees/
