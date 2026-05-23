@@ -310,11 +310,14 @@ class GameMaster:
     # ------------------------------------------------------------------
 
     _GM_SYSTEM = (
-        "你是TRPG的 **Game Master (地下城主)**。"
-        "根据玩家输入和检定结果，用第三人称进行场景叙述。"
-        "你可以描述环境氛围、动作过程、以及检定结果的戏剧化展现。"
-        "不要以角色身份说话。直接叙述，不加前缀。"
-        "每次不超过80字。"
+        "你是TRPG的地下城主(Game Master)。你的任务是叙述场景，不是扮演角色。\n"
+        "严格遵守:\n"
+        "- 用第三人称客观叙述(如: '他推开门，冷风灌了进来。')。\n"
+        "- 禁止使用括号进行动作描写(如: '(推开门)'、'(看向玩家)')。\n"
+        "- 禁止以NPC的口吻说话或复述NPC的对话。\n"
+        "- 禁止说'你觉得'、'你感到'——只描述客观事实。\n"
+        "- 每次不超过100字。\n"
+        "- 纯社交场景一句话带过环境即可(如: '酒馆里人声嘈杂。')。"
     )
 
     def _call_gm(
@@ -325,25 +328,31 @@ class GameMaster:
         memories: list[dict],
     ) -> str:
         """GM Agent: 叙述场景和检定结果。"""
-        # 无检定且无知识/记忆触发 → 不需要 GM 旁白
-        if not check_result and not knowledge and not memories:
-            return ""
+        # 纯对话（无检定、无特殊知识触发）→ 极简环境描写
+        if not check_result:
+            # 只有知识或记忆触发时才给轻量旁白
+            if not knowledge and not memories:
+                return ""
 
         gm_parts = [self._GM_SYSTEM]
-
-        # 上下文给 GM
-        gm_parts.append(f"角色: {self.character.name}，{self.character.personality['tone']}")
         state = self.state.get_state()
+        gm_parts.append(
+            f"当前NPC: {self.character.name} (仅作背景参考，你不需要模仿ta)"
+        )
 
         if check_result:
             gm_parts.append(f"\n检定结果:\n{check_result['narrative']}")
+            gm_parts.append("请叙述这个行动的过程和结果。")
+        else:
+            gm_parts.append("\n请用一句话描述当前环境氛围。")
+
         if knowledge:
-            gm_parts.append(f"\n相关知识:\n" + "\n".join(knowledge[:2]))
+            gm_parts.append(f"相关知识:\n" + "\n".join(knowledge[:2]))
         if memories:
-            gm_parts.append(f"\n最近事件:\n" + "\n".join(m["content"] for m in memories[:2]))
+            gm_parts.append(f"最近事件:\n" + "\n".join(m["content"] for m in memories[:2]))
 
         gm_system = "\n".join(gm_parts)
-        gm_messages = [{"role": "user", "content": f"玩家行动: {user_input}"}]
+        gm_messages = [{"role": "user", "content": f"玩家: {user_input}"}]
 
         if self._llm_available and self.llm:
             try:
@@ -396,7 +405,7 @@ class GameMaster:
             char_prompt += (
                 f"\n\n## GM旁白\n"
                 f"{gm_narration}\n\n"
-                f"请根据GM的叙述，以{name}的身份回应玩家。"
+                f"GM已经描述了场景。以{name}的身份回应玩家，不要复述GM的内容。"
             )
 
         char_messages.append({"role": "user", "content": user_input})
