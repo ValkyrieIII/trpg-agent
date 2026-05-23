@@ -1,0 +1,14 @@
+# ChromaDB 持久化数据
+data/chroma/
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+
+# 测试缓存
+.pytest_cache/
+
+# sentence-transformers 模型缓存
+~/.cache/huggingface/
+models/
