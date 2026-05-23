@@ -59,7 +59,9 @@ class TestTrap:
         assert result["outcome"] == "failure"
         assert result["state_changes"] == ["combat"]
         assert "触发陷阱受伤" in result["narrative"]
-        # 'combat' reduces stamina: fresh → tired
+        # State changes are returned — caller applies them
+        for sc in result["state_changes"]:
+            state.apply(sc)
         assert state.get_state()["stamina"] == "tired"
 
     def test_failure_on_exact_dc_boundary(self, monkeypatch):

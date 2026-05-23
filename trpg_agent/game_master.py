@@ -335,11 +335,11 @@ class GameMaster:
         except Exception:
             return None
 
-    def _handle_event(self, user_input: str) -> str:
+    def _handle_event(self, user_input: str) -> dict:
         """处理事件触发意图。
 
         通过 embedding 语义相似度确定触发类型，调用 :func:`event.resolve_trigger`
-        进行判定，返回判定结果叙事描述。
+        进行判定，返回完整事件结果 dict。
         """
         trigger_type = self._classify_event(user_input)
         if trigger_type is None:
@@ -350,6 +350,7 @@ class GameMaster:
 
         # For combat, find the target NPC and pass its state
         context = {}
+        target = None
         if trigger_type == "combat":
             target = self._find_npc_in_input(user_input)
             if target:
@@ -364,15 +365,31 @@ class GameMaster:
             context=context if context else None,
         )
 
-        narrative = result.get("narrative", "")
-        state_changes = result.get("state_changes", [])
-        if state_changes:
-            narrative += f"（状态变化：{', '.join(state_changes)}）"
+        # Apply state changes from event
+        for sc in result.get("state_changes", []):
+            self.player_state.apply(sc)
+        # Apply NPC state changes (e.g. threatened)
+        if target and result.get("npc_state_changes"):
+            npc_state = self.npc_store.get_state(target)
+            if npc_state:
+                for sc in result["npc_state_changes"]:
+                    npc_state.apply(sc)
 
+        narrative = result.get("narrative", "")
         if self.debug:
             print(f"[DEBUG] 事件结果: {narrative}")
 
-        return narrative
+        return {
+            "narrative": narrative,
+            "event_type": trigger_type,
+            "outcome": result.get("outcome", ""),
+            "check_detail": result.get("check_detail", ""),
+            "damage_dealt": result.get("damage_dealt", 0),
+            "damage_taken": result.get("damage_taken", 0),
+            "target_npc": target,
+            "def_hp": result.get("def_hp", ""),
+            "target_status": result.get("target_status", "alive"),
+        }
 
     def _find_npc_in_input(self, user_input: str) -> Optional[str]:
         """Find an NPC name mentioned in user input."""
@@ -384,6 +401,116 @@ class GameMaster:
             if npc.name in user_input:
                 return npc.name
         return None
+
+    # ------------------------------------------------------------------
+    #  Unified post-processing pipeline
+    # ------------------------------------------------------------------
+
+    def _build_event_context(self, user_input: str, handler: str,
+                             event_data: dict = None) -> dict:
+        """Build unified event context JSON for GM narration and memory."""
+        ps = self.player_state.get_state()
+        ctx = {
+            "handler": handler,
+            "input": user_input,
+            "player_hp": f"{ps['hp']}/{ps['max_hp']}",
+            "player_state": {"emotion": ps["emotion"], "trust": ps["trust"],
+                             "stamina": ps["stamina"]},
+            "event_type": None,
+            "outcome": None,
+            "check_detail": None,
+            "damage_dealt": 0,
+            "damage_taken": 0,
+            "target_npc": None,
+            "target_hp": None,
+            "narrative": "",
+        }
+        if event_data:
+            ctx.update(event_data)
+            if event_data.get("def_hp"):
+                ctx["target_hp"] = event_data["def_hp"]
+        return ctx
+
+    def _post_process(self, user_input: str, handler: str,
+                      narrative: str, event_data: dict = None) -> str:
+        """Unified post-processing: GM narration wrap-up + memory write.
+
+        Parameters
+        ----------
+        user_input : str
+            The original player input.
+        handler : str
+            ``"event"``, ``"dialogue"``, ``"dice"``, or ``"info"``.
+        narrative : str
+            The handler's output text (check result, dice roll, etc.).
+        event_data : dict or None
+            Event detail from ``_handle_event`` or dialogue pipeline.
+
+        Returns
+        -------
+        str
+            Final assembled response with GM narration.
+        """
+        ctx = self._build_event_context(user_input, handler, event_data)
+
+        if self.debug:
+            print(f"[DEBUG] 事件上下文: {ctx}")
+
+        # ---- GM Agent narrative wrap-up ----
+        gm_wrap = ""
+        if self._llm_available and self.llm:
+            gm_wrap = self._call_gm_wrap(narrative, ctx)
+        if gm_wrap:
+            response = f"{narrative}\n\n[GM]: {gm_wrap}"
+        else:
+            response = narrative
+
+        # ---- Memory write ----
+        if self._llm_available and self.llm and handler != "info":
+            combined = f"玩家({self.player.name})：{user_input}\n结果：{narrative}"
+            if gm_wrap:
+                combined += f"\nGM叙事：{gm_wrap}"
+            try:
+                extracted = self.llm.extract_memory(combined)
+                if extracted:
+                    self.memory.add(
+                        content=extracted,
+                        context={"emotion": self.player_state.get_state()["emotion"]},
+                    )
+                    if self.debug:
+                        print(f"[DEBUG] 记忆写入: {extracted}")
+            except Exception:
+                pass
+
+        # ---- Track scene NPCs ----
+        if handler == "event" and event_data:
+            target = event_data.get("target_npc")
+            if target and target not in self.scene_npcs:
+                self.scene_npcs.append(target)
+            # Remove dead NPC
+            if event_data.get("target_status") == "dead" and target in self.scene_npcs:
+                self.scene_npcs.remove(target)
+
+        return response
+
+    def _call_gm_wrap(self, narrative: str, ctx: dict) -> str:
+        """Call GM Agent for a short narrative wrap-up after an event/action."""
+        system = (
+            "你是 TRPG 地下城主。以下事件刚刚发生，请用第三人称叙述后续场景。\n"
+            "- 不超过100字\n"
+            "- 描述视觉、听觉、氛围\n"
+            "- NPC 受伤时描述伤口和反应\n"
+            "- NPC 死亡时描述倒下\n"
+            "- 不要描述玩家角色的内心感受\n"
+        )
+        messages = [
+            {"role": "user", "content": json.dumps(ctx, ensure_ascii=False)},
+            {"role": "user", "content": f"事件文本：{narrative}\n请叙述后续。"},
+        ]
+        try:
+            return self.llm.chat(system=system, messages=messages)
+        except Exception:
+            return ""
 
     # ------------------------------------------------------------------
     #  Action matching & check execution
@@ -659,6 +786,10 @@ class GameMaster:
                     npc = results[0]
 
             if npc is not None:
+                # Track in scene NPCs
+                if responding_npc not in self.scene_npcs:
+                    self.scene_npcs.append(responding_npc)
+
                 if self.debug:
                     hist_len = len(self.npc_store.get_history(responding_npc))
                     print(f"[DEBUG] NPC Agent 调用: {responding_npc} (历史{hist_len}轮)")
@@ -820,12 +951,15 @@ class GameMaster:
         if intent == "dice":
             response = self._handle_dice(user_input)
             self._update_state_from_keywords(user_input)
+            response = self._post_process(user_input, "dice", response)
         elif intent == "info":
             response = self._handle_info()
-            self._update_state_from_keywords(user_input)
+            response = self._post_process(user_input, "info", response)
         elif intent == "event":
-            response = self._handle_event(user_input)
-            self._update_state_from_keywords(user_input)
+            event_data = self._handle_event(user_input)
+            response = self._post_process(
+                user_input, "event", event_data["narrative"], event_data,
+            )
         else:
             # ---- Tier 2: embedding 判定 ----
             event_type = self._classify_event(user_input)
@@ -833,8 +967,10 @@ class GameMaster:
                 print(f"[DEBUG] embedding 分类: {event_type or '无匹配'}")
             if event_type is not None:
                 # embedding 匹配到具体事件类型 → 事件处理
-                response = self._handle_event(user_input)
-                self._update_state_from_keywords(user_input)
+                event_data = self._handle_event(user_input)
+                response = self._post_process(
+                    user_input, "event", event_data["narrative"], event_data,
+                )
             else:
                 # ---- Tier 3: LLM (GM Agent) 最终判定 ----
                 response = self._handle_dialogue(user_input)

@@ -94,7 +94,7 @@ def resolve_trigger(
 def _resolve_trap(state: Any) -> dict[str, Any]:
     """Trap trigger — difficulty check DC 15.
 
-    On failure, applies ``"combat"`` to the state machine (reduces stamina).
+    On failure, returns ``state_changes=["combat"]`` — caller applies.
     """
     result = difficulty_check(dc=15)
     roll_val = result["roll"]
@@ -103,13 +103,18 @@ def _resolve_trap(state: Any) -> dict[str, Any]:
             "outcome": "success",
             "state_changes": [],
             "narrative": f"陷阱判定: d20 = {roll_val} ≥ DC 15 → 察觉并避开",
+            "check_detail": f"d20 = {roll_val} ≥ DC 15",
+            "damage_dealt": 0,
+            "damage_taken": 0,
         }
     else:
-        state.apply("combat")
         return {
             "outcome": "failure",
             "state_changes": ["combat"],
             "narrative": f"陷阱判定: d20 = {roll_val} < DC 15 → 触发陷阱受伤",
+            "check_detail": f"d20 = {roll_val} < DC 15",
+            "damage_dealt": 0,
+            "damage_taken": 0,
         }
 
 
@@ -137,12 +142,18 @@ def _resolve_environment(context: dict[str, Any]) -> dict[str, Any]:
             "outcome": "success",
             "state_changes": [],
             "narrative": f"环境判定: d20 = {roll_val} → {total} ≥ DC {dc} → {custom_success}",
+            "check_detail": f"d20 = {roll_val} ≥ DC {dc}",
+            "damage_dealt": 0,
+            "damage_taken": 0,
         }
     else:
         return {
             "outcome": "failure",
             "state_changes": [],
             "narrative": f"环境判定: d20 = {roll_val} → {total} < DC {dc} → {custom_failure}",
+            "check_detail": f"d20 = {roll_val} < DC {dc}",
+            "damage_dealt": 0,
+            "damage_taken": 0,
         }
 
 
@@ -159,18 +170,27 @@ def _resolve_npc_reaction(state: Any) -> dict[str, Any]:
             "outcome": "friendly",
             "state_changes": [],
             "narrative": "NPC 态度友好，愿意提供帮助",
+            "check_detail": f"信任度={round(trust, 2)} ≥ 0.7",
+            "damage_dealt": 0,
+            "damage_taken": 0,
         }
     elif trust >= 0.3:
         return {
             "outcome": "neutral",
             "state_changes": [],
             "narrative": "NPC 态度中立，等待进一步行动",
+            "check_detail": f"信任度={round(trust, 2)} ≥ 0.3",
+            "damage_dealt": 0,
+            "damage_taken": 0,
         }
     else:
         return {
             "outcome": "hostile",
             "state_changes": [],
             "narrative": "NPC 态度敌对，随时可能攻击",
+            "check_detail": f"信任度={round(trust, 2)} < 0.3",
+            "damage_dealt": 0,
+            "damage_taken": 0,
         }
 
 
@@ -205,41 +225,43 @@ def _resolve_combat(
 
         # Apply damage to defender
         def_status = "alive"
+        def_hp_str = ""
         if defender_state is not None:
             def_status = defender_state.take_damage(damage)
-            defender_state.apply("threatened")
+            def_hp_str = f"{defender_state.hp}/{defender_state.max_hp}"
 
         narrative = (
             f"战斗判定: d20 = {roll_val} ≥ DC 12 → 攻击命中"
         )
         if defender_state is not None:
-            narrative += f"（d6={dmg_roll}+{str_bonus}={damage}点伤害, HP剩余{defender_state.hp}/{defender_state.max_hp}）"
+            narrative += f"（d6={dmg_roll}+{str_bonus}={damage}点伤害, HP剩余{def_hp_str}）"
             if def_status == "dead":
                 narrative += " —— 目标倒下！"
 
         return {
             "outcome": "success",
             "state_changes": [],
+            "npc_state_changes": ["threatened"],
             "narrative": narrative,
-            "damage": damage,
+            "check_detail": f"d20 = {roll_val} ≥ DC 12",
+            "damage_dealt": damage,
+            "damage_taken": 0,
+            "def_hp": def_hp_str,
+            "target_status": def_status,
         }
     else:
-        # Attacker loses stamina
-        state.apply("combat")
-
         # Defender counter-attack
-        counter_narrative = ""
         counter_damage = 0
+        counter_narrative = ""
+        player_hp_str = f"{state.hp}/{state.max_hp}"
         if defender_state is not None:
             _, counter_roll = roll("1d6")
             counter_damage = counter_roll
-            defender_attrs = {"strength": 10}
-            if hasattr(defender_state, "_counter_strength"):
-                defender_attrs["strength"] = defender_state._counter_strength
             state.take_damage(counter_damage)
+            player_hp_str = f"{state.hp}/{state.max_hp}"
             counter_narrative = (
                 f"｜ 对方反击（d6={counter_roll}），你受到{counter_damage}点伤害"
-                f"（HP剩余{state.hp}/{state.max_hp}）"
+                f"（HP剩余{player_hp_str}）"
             )
 
         narrative = f"战斗判定: d20 = {roll_val} < DC 12 → 攻击落空{counter_narrative}"
@@ -248,8 +270,11 @@ def _resolve_combat(
             "outcome": "failure",
             "state_changes": ["combat"],
             "narrative": narrative,
-            "damage": 0,
-            "counter_damage": counter_damage,
+            "check_detail": f"d20 = {roll_val} < DC 12",
+            "damage_dealt": 0,
+            "damage_taken": counter_damage,
+            "def_hp": "",
+            "target_status": "alive",
         }
 
 
@@ -290,10 +315,16 @@ def _resolve_discovery(character: Any, context: dict[str, Any]) -> dict[str, Any
             "outcome": "success",
             "state_changes": [],
             "narrative": f"发现判定: d100 = {roll_val} ≤ 技能{effective} → {custom_success}",
+            "check_detail": f"d100 = {roll_val} ≤ 技能{effective}",
+            "damage_dealt": 0,
+            "damage_taken": 0,
         }
     else:
         return {
             "outcome": "failure",
             "state_changes": [],
             "narrative": f"发现判定: d100 = {roll_val} > 技能{effective} → {custom_failure}",
+            "check_detail": f"d100 = {roll_val} > 技能{effective}",
+            "damage_dealt": 0,
+            "damage_taken": 0,
         }
