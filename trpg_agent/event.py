@@ -90,18 +90,19 @@ def _resolve_trap(state: Any) -> dict[str, Any]:
     On failure, applies ``"combat"`` to the state machine (reduces stamina).
     """
     result = difficulty_check(dc=15)
+    roll_val = result["roll"]
     if result["success"]:
         return {
             "outcome": "success",
             "state_changes": [],
-            "narrative": "察觉并避开",
+            "narrative": f"陷阱判定: d20 = {roll_val} ≥ DC 15 → 察觉并避开",
         }
     else:
         state.apply("combat")
         return {
             "outcome": "failure",
             "state_changes": ["combat"],
-            "narrative": "触发陷阱受伤",
+            "narrative": f"陷阱判定: d20 = {roll_val} < DC 15 → 触发陷阱受伤",
         }
 
 
@@ -122,17 +123,19 @@ def _resolve_environment(context: dict[str, Any]) -> dict[str, Any]:
     custom_failure = context.get("narrative_failure", "环境判定失败")
 
     result = difficulty_check(dc=dc)
+    roll_val = result["roll"]
+    total = result["total"]
     if result["success"]:
         return {
             "outcome": "success",
             "state_changes": [],
-            "narrative": custom_success,
+            "narrative": f"环境判定: d20 = {roll_val} → {total} ≥ DC {dc} → {custom_success}",
         }
     else:
         return {
             "outcome": "failure",
             "state_changes": [],
-            "narrative": custom_failure,
+            "narrative": f"环境判定: d20 = {roll_val} → {total} < DC {dc} → {custom_failure}",
         }
 
 
@@ -170,18 +173,19 @@ def _resolve_combat(state: Any) -> dict[str, Any]:
     On failure, applies ``"combat"`` to the state machine (reduces stamina).
     """
     result = difficulty_check(dc=12)
+    roll_val = result["roll"]
     if result["success"]:
         return {
             "outcome": "success",
             "state_changes": [],
-            "narrative": "战斗判定成功 — 攻击命中",
+            "narrative": f"战斗判定: d20 = {roll_val} ≥ DC 12 → 攻击命中",
         }
     else:
         state.apply("combat")
         return {
             "outcome": "failure",
             "state_changes": ["combat"],
-            "narrative": "战斗判定失败 — 攻击落空",
+            "narrative": f"战斗判定: d20 = {roll_val} < DC 12 → 攻击落空",
         }
 
 
@@ -215,15 +219,17 @@ def _resolve_discovery(character: Any, context: dict[str, Any]) -> dict[str, Any
             break
 
     result = skill_check(skill_value, modifier=modifier)
+    roll_val = result["roll"]
+    effective = result["effective_skill"]
     if result["success"]:
         return {
             "outcome": "success",
             "state_changes": [],
-            "narrative": custom_success,
+            "narrative": f"发现判定: d100 = {roll_val} ≤ 技能{effective} → {custom_success}",
         }
     else:
         return {
             "outcome": "failure",
             "state_changes": [],
-            "narrative": custom_failure,
+            "narrative": f"发现判定: d100 = {roll_val} > 技能{effective} → {custom_failure}",
         }

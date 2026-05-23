@@ -46,7 +46,7 @@ class TestTrap:
 
         assert result["outcome"] == "success"
         assert result["state_changes"] == []
-        assert result["narrative"] == "察觉并避开"
+        assert "察觉并避开" in result["narrative"]
         # State should be untouched
         assert state.get_state()["stamina"] == "fresh"
 
@@ -58,7 +58,7 @@ class TestTrap:
 
         assert result["outcome"] == "failure"
         assert result["state_changes"] == ["combat"]
-        assert result["narrative"] == "触发陷阱受伤"
+        assert "触发陷阱受伤" in result["narrative"]
         # 'combat' reduces stamina: fresh → tired
         assert state.get_state()["stamina"] == "tired"
 
@@ -83,14 +83,14 @@ class TestEnvironment:
         monkeypatch.setattr("trpg_agent.check.roll", lambda _: ([12], 12))
         result = resolve_trigger("environment", _make_character(), StateMachine())
         assert result["outcome"] == "success"
-        assert result["narrative"] == "环境判定成功"
+        assert "环境判定成功" in result["narrative"]
 
     def test_default_dc_failure(self, monkeypatch):
         """Default DC 12, roll 11 → failure."""
         monkeypatch.setattr("trpg_agent.check.roll", lambda _: ([11], 11))
         result = resolve_trigger("environment", _make_character(), StateMachine())
         assert result["outcome"] == "failure"
-        assert result["narrative"] == "环境判定失败"
+        assert "环境判定失败" in result["narrative"]
 
     def test_custom_dc(self, monkeypatch):
         """DC 20 from context, roll 15 → failure."""
@@ -110,7 +110,7 @@ class TestEnvironment:
             {"dc": 10, "narrative_success": "平安通过", "narrative_failure": "遭遇险情"},
         )
         assert result["outcome"] == "success"
-        assert result["narrative"] == "平安通过"
+        assert "平安通过" in result["narrative"]
 
     def test_empty_context(self, monkeypatch):
         """Empty dict context uses defaults (DC 12)."""
@@ -194,7 +194,7 @@ class TestDiscovery:
         char = _make_character(skills=[{"name": "侦查", "value": 60}])
         result = resolve_trigger("discovery", char, StateMachine())
         assert result["outcome"] == "success"
-        assert result["narrative"] == "发现了线索"
+        assert "发现了线索" in result["narrative"]
 
     def test_failure_with_matching_skill(self, monkeypatch):
         """Roll > skill value → failure."""
@@ -202,7 +202,7 @@ class TestDiscovery:
         char = _make_character(skills=[{"name": "侦查", "value": 60}])
         result = resolve_trigger("discovery", char, StateMachine())
         assert result["outcome"] == "failure"
-        assert result["narrative"] == "仔细观察后发现了..."
+        assert "仔细观察后发现了..." in result["narrative"]
 
     def test_default_skill_when_no_skills(self, monkeypatch):
         """Character with no skills uses default value 50."""
@@ -254,7 +254,7 @@ class TestDiscovery:
             {"narrative_success": "你发现了一个隐藏的开关！", "narrative_failure": "什么也没有"},
         )
         assert result["outcome"] == "success"
-        assert result["narrative"] == "你发现了一个隐藏的开关！"
+        assert "你发现了一个隐藏的开关！" in result["narrative"]
 
     def test_no_state_change(self, monkeypatch):
         """Discovery never mutates the state machine."""
