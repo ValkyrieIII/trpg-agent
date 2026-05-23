@@ -32,10 +32,17 @@ from trpg_agent.game_master import GameMaster
 
 def main() -> None:
     """Entry point: display welcome panel, then run the main interaction loop."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description="TRPG Agent — AI驱动的单人跑团")
+    parser.add_argument("--debug", "-d", action="store_true", help="显示每轮管线诊断信息")
+    parser.add_argument("--config", "-c", default="config.yaml", help="配置文件路径")
+    args = parser.parse_args()
+
     console = Console()
 
-    # Config path (from env or default)
-    config_path = os.environ.get("TRPG_CONFIG", "config.yaml")
+    # Config path
+    config_path = os.environ.get("TRPG_CONFIG", args.config)
 
     # ---- Check API key early and warn ----
     if not os.environ.get("DEEPSEEK_API_KEY"):
@@ -53,7 +60,7 @@ def main() -> None:
 
     # ---- Initialize GameMaster ----
     try:
-        gm = GameMaster(config_path)
+        gm = GameMaster(config_path, debug=args.debug)
     except Exception as e:
         console.print(
             Panel(

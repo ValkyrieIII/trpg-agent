@@ -120,7 +120,9 @@ class GameMaster:
         config_path: str,
         llm_api_key: Optional[str] = None,
         knowledge_dir: str = "data/knowledge",
+        debug: bool = False,
     ) -> None:
+        self.debug = debug
         # -- Player --
         self.player = Character.load(config_path)
 
@@ -295,6 +297,9 @@ class GameMaster:
         """
         trigger_type = self._classify_event(user_input)
 
+        if self.debug:
+            print(f"[DEBUG] 事件分类: {trigger_type}")
+
         result = resolve_trigger(
             trigger_type=trigger_type,
             character=self.player,
@@ -305,6 +310,9 @@ class GameMaster:
         state_changes = result.get("state_changes", [])
         if state_changes:
             narrative += f"（状态变化：{', '.join(state_changes)}）"
+
+        if self.debug:
+            print(f"[DEBUG] 事件结果: {narrative}")
 
         return narrative
 
@@ -519,9 +527,16 @@ class GameMaster:
         # ---- Step 0: 硬编码匹配行动 ----
         action = self._match_action(user_input)
 
+        if self.debug and action:
+            print(f"[DEBUG] 硬编码行动匹配: {action['action_desc']} → {action['check_type']}({action['skill_or_dc']})")
+
         # ---- Step 1: 检索 ----
         memories = self.memory.full_retrieve(user_input)
         knowledge = self.knowledge.query(user_input, self.player.name)
+
+        if self.debug:
+            print(f"[DEBUG] 记忆检索: {len(memories)}条")
+            print(f"[DEBUG] 知识检索: {len(knowledge)}条")
 
         # ---- Step 2: GM Agent ----
         gm_result = self._call_gm(user_input, knowledge, memories)
@@ -531,10 +546,19 @@ class GameMaster:
         responding_npc = gm_result.get("responding_npc")
         new_npc_name = gm_result.get("new_npc")
 
+        if self.debug:
+            print(f"[DEBUG] GM 叙事: {narration[:60]}{'...' if len(narration) > 60 else ''}")
+            print(f"[DEBUG] GM 检定判定: {check_info}")
+            print(f"[DEBUG] GM 指定 NPC: {responding_npc or '无'}")
+            if new_npc_name:
+                print(f"[DEBUG] GM 创建新 NPC: {new_npc_name}")
+
         # ---- Step 3: 执行检定（GM 判断需要时） ----
         check_result = None
         if check_info is not None and action is not None:
             check_result = self._execute_check(action)
+            if self.debug:
+                print(f"[DEBUG] 检定结果: {check_result['narrative']}")
 
         # ---- Step 4: 处理新 NPC 创建 ----
         if new_npc_name and isinstance(new_npc_name, str):
@@ -563,6 +587,10 @@ class GameMaster:
                     npc = results[0]
 
             if npc is not None:
+                if self.debug:
+                    hist_len = len(self.npc_store.get_history(responding_npc))
+                    print(f"[DEBUG] NPC Agent 调用: {responding_npc} (历史{hist_len}轮)")
+
                 npc_system = (
                     npc.build_personality_prompt()
                     + "\n\n"
@@ -709,6 +737,11 @@ class GameMaster:
 
         intent = self._detect_intent(user_input)
 
+        if self.debug:
+            print(f"\n{'─'*50}")
+            print(f"[DEBUG] 玩家输入: {user_input}")
+            print(f"[DEBUG] 意图: {intent}")
+
         if intent == "dice":
             response = self._handle_dice(user_input)
             self._update_state_from_keywords(user_input)
@@ -721,5 +754,11 @@ class GameMaster:
         else:
             # dialogue handler 内部已包含 Step 5 状态更新
             response = self._handle_dialogue(user_input)
+
+        if self.debug:
+            state = self.state.get_state()
+            print(f"[DEBUG] 当前状态: 情绪={state['emotion']} 信任={state['trust']} 体力={state['stamina']}")
+            print(f"[DEBUG] 场景NPC: {self.scene_npcs}")
+            print(f"{'─'*50}")
 
         return response
