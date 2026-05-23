@@ -526,8 +526,8 @@ class TestConversationHistory:
         history = store.get_history("老李")
         # Should retain only the most recent max_history * 2 = 20 turns
         assert len(history) == 20
-        # The oldest surviving entry should be message 5 (index 10 / 2 = 5)
-        assert "message 5" in history[0]["content"]
+        # 50 entries total, keep last 20 — oldest index = 30 → iteration 15
+        assert "message 15" in history[0]["content"]
 
 
 # -------------------------------------------------------------------
