@@ -21,6 +21,7 @@ import yaml
 from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
 
 from trpg_agent.character import Character
+from trpg_agent.state import StateMachine, calc_max_hp
 
 
 # ---------------------------------------------------------------------------
@@ -252,6 +253,7 @@ class NPCStore:
         # -- In-memory caches --
         self._npcs: Dict[str, NPCCharacter] = {}  # name -> NPCCharacter
         self._histories: Dict[str, List[Dict[str, str]]] = {}  # name -> history
+        self._states: Dict[str, StateMachine] = {}  # name -> StateMachine
         self._max_history: int = 10
 
         # -- Restore from ChromaDB --
@@ -417,7 +419,13 @@ class NPCStore:
             few_shot=few_shot or [],
         )
         self.save(npc)
+        # Initialize state machine for this NPC
+        self._states[name] = StateMachine(max_hp=calc_max_hp(attributes))
         return npc
+
+    def get_state(self, name: str) -> Optional[StateMachine]:
+        """Get the StateMachine for an NPC."""
+        return self._states.get(name)
 
     # ------------------------------------------------------------------
     #  Per-NPC conversation history

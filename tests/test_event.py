@@ -41,7 +41,7 @@ class TestTrap:
     def test_success_when_d20_ge_15(self, monkeypatch):
         """Roll >= 15 → success, no state change."""
         monkeypatch.setattr("trpg_agent.check.roll", lambda _: ([15], 15))
-        state = StateMachine()
+        state = StateMachine(max_hp=20)
         result = resolve_trigger("trap", _make_character(), state)
 
         assert result["outcome"] == "success"
@@ -53,7 +53,7 @@ class TestTrap:
     def test_failure_when_d20_lt_15(self, monkeypatch):
         """Roll < 15 → failure, state gets 'combat' applied."""
         monkeypatch.setattr("trpg_agent.check.roll", lambda _: ([10], 10))
-        state = StateMachine()
+        state = StateMachine(max_hp=20)
         result = resolve_trigger("trap", _make_character(), state)
 
         assert result["outcome"] == "failure"
@@ -65,7 +65,7 @@ class TestTrap:
     def test_failure_on_exact_dc_boundary(self, monkeypatch):
         """Roll 14 (below 15) is still a failure."""
         monkeypatch.setattr("trpg_agent.check.roll", lambda _: ([14], 14))
-        state = StateMachine()
+        state = StateMachine(max_hp=20)
         result = resolve_trigger("trap", _make_character(), state)
         assert result["outcome"] == "failure"
 
@@ -81,14 +81,14 @@ class TestEnvironment:
     def test_default_dc_success(self, monkeypatch):
         """Default DC 12, roll 12 → success."""
         monkeypatch.setattr("trpg_agent.check.roll", lambda _: ([12], 12))
-        result = resolve_trigger("environment", _make_character(), StateMachine())
+        result = resolve_trigger("environment", _make_character(), StateMachine(max_hp=20))
         assert result["outcome"] == "success"
         assert "环境判定成功" in result["narrative"]
 
     def test_default_dc_failure(self, monkeypatch):
         """Default DC 12, roll 11 → failure."""
         monkeypatch.setattr("trpg_agent.check.roll", lambda _: ([11], 11))
-        result = resolve_trigger("environment", _make_character(), StateMachine())
+        result = resolve_trigger("environment", _make_character(), StateMachine(max_hp=20))
         assert result["outcome"] == "failure"
         assert "环境判定失败" in result["narrative"]
 
@@ -96,7 +96,7 @@ class TestEnvironment:
         """DC 20 from context, roll 15 → failure."""
         monkeypatch.setattr("trpg_agent.check.roll", lambda _: ([15], 15))
         result = resolve_trigger(
-            "environment", _make_character(), StateMachine(), {"dc": 20}
+            "environment", _make_character(), StateMachine(max_hp=20), {"dc": 20}
         )
         assert result["outcome"] == "failure"
 
@@ -106,7 +106,7 @@ class TestEnvironment:
         result = resolve_trigger(
             "environment",
             _make_character(),
-            StateMachine(),
+            StateMachine(max_hp=20),
             {"dc": 10, "narrative_success": "平安通过", "narrative_failure": "遭遇险情"},
         )
         assert result["outcome"] == "success"
@@ -115,15 +115,17 @@ class TestEnvironment:
     def test_empty_context(self, monkeypatch):
         """Empty dict context uses defaults (DC 12)."""
         monkeypatch.setattr("trpg_agent.check.roll", lambda _: ([12], 12))
-        result = resolve_trigger("environment", _make_character(), StateMachine(), {})
+        result = resolve_trigger("environment", _make_character(), StateMachine(max_hp=20), {})
         assert result["outcome"] == "success"
 
     def test_no_state_change(self, monkeypatch):
         """Environment never mutates the state machine."""
         monkeypatch.setattr("trpg_agent.check.roll", lambda _: ([5], 5))
-        state = StateMachine()
+        state = StateMachine(max_hp=20)
         resolve_trigger("environment", _make_character(), state)
-        assert state.get_state() == {"emotion": "calm", "trust": 0.5, "stamina": "fresh"}
+        assert state.get_state()["emotion"] == "calm"
+        assert state.get_state()["trust"] == 0.5
+        assert state.get_state()["stamina"] == "fresh"
 
 
 # ---------------------------------------------------------------------------
@@ -136,48 +138,50 @@ class TestNpcReaction:
 
     def test_friendly_when_trust_ge_07(self):
         """Trust >= 0.7 → friendly."""
-        state = StateMachine(trust=0.7)
+        state = StateMachine(max_hp=20, trust=0.7)
         result = resolve_trigger("npc_reaction", _make_character(), state)
         assert result["outcome"] == "friendly"
         assert "友好" in result["narrative"]
 
     def test_friendly_above_threshold(self):
         """Trust 1.0 → friendly."""
-        state = StateMachine(trust=1.0)
+        state = StateMachine(max_hp=20, trust=1.0)
         result = resolve_trigger("npc_reaction", _make_character(), state)
         assert result["outcome"] == "friendly"
 
     def test_neutral_when_trust_between_03_and_07(self):
         """Trust 0.5 → neutral."""
-        state = StateMachine(trust=0.5)
+        state = StateMachine(max_hp=20, trust=0.5)
         result = resolve_trigger("npc_reaction", _make_character(), state)
         assert result["outcome"] == "neutral"
         assert "中立" in result["narrative"]
 
     def test_neutral_at_exact_03(self):
         """Trust exactly 0.3 → neutral (>= 0.3)."""
-        state = StateMachine(trust=0.3)
+        state = StateMachine(max_hp=20, trust=0.3)
         result = resolve_trigger("npc_reaction", _make_character(), state)
         assert result["outcome"] == "neutral"
 
     def test_hostile_when_trust_below_03(self):
         """Trust 0.29 → hostile."""
-        state = StateMachine(trust=0.29)
+        state = StateMachine(max_hp=20, trust=0.29)
         result = resolve_trigger("npc_reaction", _make_character(), state)
         assert result["outcome"] == "hostile"
         assert "敌对" in result["narrative"]
 
     def test_hostile_at_zero(self):
         """Trust 0.0 → hostile."""
-        state = StateMachine(trust=0.0)
+        state = StateMachine(max_hp=20, trust=0.0)
         result = resolve_trigger("npc_reaction", _make_character(), state)
         assert result["outcome"] == "hostile"
 
     def test_no_state_change(self):
         """NPC reaction never mutates the state machine."""
-        state = StateMachine(trust=0.5)
+        state = StateMachine(max_hp=20, trust=0.5)
         resolve_trigger("npc_reaction", _make_character(), state)
-        assert state.get_state() == {"emotion": "calm", "trust": 0.5, "stamina": "fresh"}
+        assert state.get_state()["emotion"] == "calm"
+        assert state.get_state()["trust"] == 0.5
+        assert state.get_state()["stamina"] == "fresh"
 
 
 # ---------------------------------------------------------------------------
@@ -192,7 +196,7 @@ class TestDiscovery:
         """Roll <= skill value → success."""
         monkeypatch.setattr("trpg_agent.check.roll", lambda _: ([40], 40))
         char = _make_character(skills=[{"name": "侦查", "value": 60}])
-        result = resolve_trigger("discovery", char, StateMachine())
+        result = resolve_trigger("discovery", char, StateMachine(max_hp=20))
         assert result["outcome"] == "success"
         assert "发现了线索" in result["narrative"]
 
@@ -200,7 +204,7 @@ class TestDiscovery:
         """Roll > skill value → failure."""
         monkeypatch.setattr("trpg_agent.check.roll", lambda _: ([90], 90))
         char = _make_character(skills=[{"name": "侦查", "value": 60}])
-        result = resolve_trigger("discovery", char, StateMachine())
+        result = resolve_trigger("discovery", char, StateMachine(max_hp=20))
         assert result["outcome"] == "failure"
         assert "仔细观察后发现了..." in result["narrative"]
 
@@ -208,14 +212,14 @@ class TestDiscovery:
         """Character with no skills uses default value 50."""
         monkeypatch.setattr("trpg_agent.check.roll", lambda _: ([40], 40))
         char = _make_character()  # no skills
-        result = resolve_trigger("discovery", char, StateMachine())
+        result = resolve_trigger("discovery", char, StateMachine(max_hp=20))
         assert result["outcome"] == "success"
 
     def test_default_skill_failure(self, monkeypatch):
         """Default skill 50, roll 51 → failure."""
         monkeypatch.setattr("trpg_agent.check.roll", lambda _: ([51], 51))
         char = _make_character()
-        result = resolve_trigger("discovery", char, StateMachine())
+        result = resolve_trigger("discovery", char, StateMachine(max_hp=20))
         assert result["outcome"] == "failure"
 
     def test_custom_skill_name(self, monkeypatch):
@@ -223,7 +227,7 @@ class TestDiscovery:
         monkeypatch.setattr("trpg_agent.check.roll", lambda _: ([30], 30))
         char = _make_character(skills=[{"name": "潜行", "value": 80}])
         result = resolve_trigger(
-            "discovery", char, StateMachine(), {"skill_name": "潜行"}
+            "discovery", char, StateMachine(max_hp=20), {"skill_name": "潜行"}
         )
         assert result["outcome"] == "success"
 
@@ -232,7 +236,7 @@ class TestDiscovery:
         monkeypatch.setattr("trpg_agent.check.roll", lambda _: ([51], 51))
         char = _make_character(skills=[{"name": "开锁", "value": 90}])
         result = resolve_trigger(
-            "discovery", char, StateMachine(), {"skill_name": "侦查"}
+            "discovery", char, StateMachine(max_hp=20), {"skill_name": "侦查"}
         )
         assert result["outcome"] == "failure"
 
@@ -240,7 +244,7 @@ class TestDiscovery:
         """Empty context uses defaults (skill_name='侦查', default 50)."""
         monkeypatch.setattr("trpg_agent.check.roll", lambda _: ([40], 40))
         char = _make_character()
-        result = resolve_trigger("discovery", char, StateMachine(), {})
+        result = resolve_trigger("discovery", char, StateMachine(max_hp=20), {})
         assert result["outcome"] == "success"
 
     def test_custom_narrative(self, monkeypatch):
@@ -250,7 +254,7 @@ class TestDiscovery:
         result = resolve_trigger(
             "discovery",
             char,
-            StateMachine(),
+            StateMachine(max_hp=20),
             {"narrative_success": "你发现了一个隐藏的开关！", "narrative_failure": "什么也没有"},
         )
         assert result["outcome"] == "success"
@@ -259,9 +263,11 @@ class TestDiscovery:
     def test_no_state_change(self, monkeypatch):
         """Discovery never mutates the state machine."""
         monkeypatch.setattr("trpg_agent.check.roll", lambda _: ([50], 50))
-        state = StateMachine()
+        state = StateMachine(max_hp=20)
         resolve_trigger("discovery", _make_character(), state)
-        assert state.get_state() == {"emotion": "calm", "trust": 0.5, "stamina": "fresh"}
+        assert state.get_state()["emotion"] == "calm"
+        assert state.get_state()["trust"] == 0.5
+        assert state.get_state()["stamina"] == "fresh"
 
 
 # ---------------------------------------------------------------------------
@@ -273,7 +279,7 @@ class TestUnknownTrigger:
     """Unrecognised trigger_type values."""
 
     def test_unknown_type(self):
-        result = resolve_trigger("unknown", _make_character(), StateMachine())
+        result = resolve_trigger("unknown", _make_character(), StateMachine(max_hp=20))
         assert result["outcome"] == "unknown_trigger"
         assert result["state_changes"] == []
         assert "unknown" in result["narrative"]
@@ -281,7 +287,7 @@ class TestUnknownTrigger:
     def test_case_insensitivity_on_valid_types(self, monkeypatch):
         """Trigger type matching should be case-insensitive."""
         monkeypatch.setattr("trpg_agent.check.roll", lambda _: ([15], 15))
-        state = StateMachine()
+        state = StateMachine(max_hp=20)
         result = resolve_trigger("TRAP", _make_character(), state)
         assert result["outcome"] == "success"
 
@@ -297,17 +303,17 @@ class TestContextEdgeCases:
     def test_context_none_treated_as_empty(self, monkeypatch):
         """None context should be treated as an empty dict."""
         monkeypatch.setattr("trpg_agent.check.roll", lambda _: ([12], 12))
-        result = resolve_trigger("environment", _make_character(), StateMachine(), None)
+        result = resolve_trigger("environment", _make_character(), StateMachine(max_hp=20), None)
         assert result["outcome"] == "success"
 
     def test_context_none_discovery(self, monkeypatch):
         """None context on discovery uses defaults."""
         monkeypatch.setattr("trpg_agent.check.roll", lambda _: ([40], 40))
-        result = resolve_trigger("discovery", _make_character(), StateMachine(), None)
+        result = resolve_trigger("discovery", _make_character(), StateMachine(max_hp=20), None)
         assert result["outcome"] == "success"
 
     def test_context_not_provided_defaults_none(self, monkeypatch):
         """Omitting context entirely is equivalent to None (default parameter)."""
         monkeypatch.setattr("trpg_agent.check.roll", lambda _: ([12], 12))
-        result = resolve_trigger("environment", _make_character(), StateMachine())
+        result = resolve_trigger("environment", _make_character(), StateMachine(max_hp=20))
         assert result["outcome"] == "success"

@@ -33,7 +33,7 @@ from trpg_agent.llm import LLM
 from trpg_agent.memory import MemoryStore
 from trpg_agent.npc import NPCStore
 from trpg_agent.rag import KnowledgeBase
-from trpg_agent.state import StateMachine
+from trpg_agent.state import StateMachine, calc_max_hp
 
 
 # ---------------------------------------------------------------------------
@@ -139,7 +139,7 @@ class GameMaster:
         self.scene_npcs: List[str] = []
 
         # -- Subsystems --
-        self.state = StateMachine()
+        self.player_state = StateMachine(max_hp=calc_max_hp(self.player.attributes))
         # NOTE: MemoryStore 和 KnowledgeBase 各自内部创建了
         # SentenceTransformerEmbeddingFunction("BAAI/bge-small-zh-v1.5") 。
         # 由于 sentence-transformers 库自带模型级缓存，实际上并没有重复
@@ -275,7 +275,7 @@ class GameMaster:
 
         返回角色摘要 + 当前情绪/信任度/体力状态。
         """
-        state = self.state.get_state()
+        state = self.player_state.get_state()
         return (
             f"{self.player.summary()}\n\n"
             f"【当前状态】\n"
@@ -348,10 +348,20 @@ class GameMaster:
         if self.debug:
             print(f"[DEBUG] 事件分类: {trigger_type}")
 
+        # For combat, find the target NPC and pass its state
+        context = {}
+        if trigger_type == "combat":
+            target = self._find_npc_in_input(user_input)
+            if target:
+                context["defender_state"] = self.npc_store.get_state(target)
+                if self.debug:
+                    print(f"[DEBUG] 战斗目标: {target}")
+
         result = resolve_trigger(
             trigger_type=trigger_type,
             character=self.player,
-            state=self.state,
+            state=self.player_state,
+            context=context if context else None,
         )
 
         narrative = result.get("narrative", "")
@@ -363,6 +373,17 @@ class GameMaster:
             print(f"[DEBUG] 事件结果: {narrative}")
 
         return narrative
+
+    def _find_npc_in_input(self, user_input: str) -> Optional[str]:
+        """Find an NPC name mentioned in user input."""
+        for npc_name in self.scene_npcs:
+            if npc_name in user_input:
+                return npc_name
+        # Also search all known NPCs
+        for npc in self.npc_store.all():
+            if npc.name in user_input:
+                return npc.name
+        return None
 
     # ------------------------------------------------------------------
     #  Action matching & check execution
@@ -698,10 +719,10 @@ class GameMaster:
         for trigger, keywords in _KEYWORD_TRIGGERS.items():
             for kw in keywords:
                 if kw in combined:
-                    self.state.apply(trigger)
+                    self.player_state.apply(trigger)
                     break
         if check_result and check_result.get("stamina_cost"):
-            self.state.apply("combat")
+            self.player_state.apply("combat")
 
         # ---- Step 8: 记录记忆 ----
         if self._llm_available and self.llm:
@@ -721,7 +742,7 @@ class GameMaster:
         if extracted:
             self.memory.add(
                 content=extracted,
-                context={"emotion": self.state.get_state()["emotion"]},
+                context={"emotion": self.player_state.get_state()["emotion"]},
             )
 
         # ---- Step 9: 更新 player_history ----
@@ -754,7 +775,7 @@ class GameMaster:
         for trigger, keywords in _KEYWORD_TRIGGERS.items():
             for kw in keywords:
                 if kw in text:
-                    self.state.apply(trigger)
+                    self.player_state.apply(trigger)
                     fired.append(trigger)
                     break
         return fired
@@ -819,7 +840,7 @@ class GameMaster:
                 response = self._handle_dialogue(user_input)
 
         if self.debug:
-            state = self.state.get_state()
+            state = self.player_state.get_state()
             print(f"[DEBUG] 当前状态: 情绪={state['emotion']} 信任={state['trust']} 体力={state['stamina']}")
             print(f"[DEBUG] 场景NPC: {self.scene_npcs}")
             print(f"{'─'*50}")

@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 from trpg_agent.check import difficulty_check, skill_check
+from trpg_agent.dice import roll
 
 
 # ---------------------------------------------------------------------------
@@ -70,7 +71,13 @@ def resolve_trigger(
     elif trigger_type == "discovery":
         return _resolve_discovery(character, context)
     elif trigger_type == "combat":
-        return _resolve_combat(state)
+        attacker_attrs = getattr(character, "attributes", {}) if character else {}
+        defender_state = context.get("defender_state") if context else None
+        return _resolve_combat(
+            state,
+            attacker_attributes=attacker_attrs,
+            defender_state=defender_state,
+        )
     else:
         return {
             "outcome": "unknown_trigger",
@@ -167,25 +174,82 @@ def _resolve_npc_reaction(state: Any) -> dict[str, Any]:
         }
 
 
-def _resolve_combat(state: Any) -> dict[str, Any]:
-    """Combat trigger — difficulty check DC 12.
+def _resolve_combat(
+    state: Any,
+    attacker_attributes: dict[str, int] | None = None,
+    defender_state: Any = None,
+) -> dict[str, Any]:
+    """Combat trigger — difficulty check DC 12 + damage roll.
 
-    On failure, applies ``"combat"`` to the state machine (reduces stamina).
+    On success: rolls d6 + strength bonus for damage, knocks down defender.
+    On failure: defender may counter-attack.
+
+    Parameters
+    ----------
+    state : StateMachine
+        The attacker's state machine (for stamina/trust changes).
+    attacker_attributes : dict or None
+        Attacker attributes for damage calculation.
+    defender_state : StateMachine or None
+        The defender's state machine (for damage application).
     """
     result = difficulty_check(dc=12)
     roll_val = result["roll"]
+    attacker_attributes = attacker_attributes or {}
+
     if result["success"]:
+        # Damage: d6 + (strength-10)//2
+        str_bonus = max(0, (attacker_attributes.get("strength", 10) - 10) // 2)
+        _, dmg_roll = roll("1d6")
+        damage = dmg_roll + str_bonus
+
+        # Apply damage to defender
+        def_status = "alive"
+        if defender_state is not None:
+            def_status = defender_state.take_damage(damage)
+            defender_state.apply("threatened")
+
+        narrative = (
+            f"战斗判定: d20 = {roll_val} ≥ DC 12 → 攻击命中"
+        )
+        if defender_state is not None:
+            narrative += f"（d6={dmg_roll}+{str_bonus}={damage}点伤害, HP剩余{defender_state.hp}/{defender_state.max_hp}）"
+            if def_status == "dead":
+                narrative += " —— 目标倒下！"
+
         return {
             "outcome": "success",
             "state_changes": [],
-            "narrative": f"战斗判定: d20 = {roll_val} ≥ DC 12 → 攻击命中",
+            "narrative": narrative,
+            "damage": damage,
         }
     else:
+        # Attacker loses stamina
         state.apply("combat")
+
+        # Defender counter-attack
+        counter_narrative = ""
+        counter_damage = 0
+        if defender_state is not None:
+            _, counter_roll = roll("1d6")
+            counter_damage = counter_roll
+            defender_attrs = {"strength": 10}
+            if hasattr(defender_state, "_counter_strength"):
+                defender_attrs["strength"] = defender_state._counter_strength
+            state.take_damage(counter_damage)
+            counter_narrative = (
+                f"｜ 对方反击（d6={counter_roll}），你受到{counter_damage}点伤害"
+                f"（HP剩余{state.hp}/{state.max_hp}）"
+            )
+
+        narrative = f"战斗判定: d20 = {roll_val} < DC 12 → 攻击落空{counter_narrative}"
+
         return {
             "outcome": "failure",
             "state_changes": ["combat"],
-            "narrative": f"战斗判定: d20 = {roll_val} < DC 12 → 攻击落空",
+            "narrative": narrative,
+            "damage": 0,
+            "counter_damage": counter_damage,
         }
 
 
