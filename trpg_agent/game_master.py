@@ -63,7 +63,7 @@ _KEYWORD_TRIGGERS: Dict[str, List[str]] = {
 # ---------------------------------------------------------------------------
 
 _EVENT_DESCRIPTIONS: Dict[str, str] = {
-    "combat":        "战斗 攻击 射击 砍杀 挥拳 刺杀 开打 揍 干掉 出手 拔刀 射箭 冲锋",
+    "combat":        "战斗 攻击 射击 砍杀 挥拳 刺杀 开打 揍 干掉 出手 拔刀 射箭 冲锋 殴打 行刺 袭击",
     "trap":          "陷阱 机关 暗器 触发陷阱 踩到 触发机关 中招",
     "environment":   "环境 天气 地形 攀爬 涉水 寒冷 酷热 暴风雪 迷雾",
     "discovery":     "发现 线索 搜索 观察 调查 仔细看 找线索 检查 侦查",
@@ -301,24 +301,25 @@ class GameMaster:
         except Exception:
             pass
 
-    def _classify_event(self, user_input: str) -> str:
+    def _classify_event(self, user_input: str) -> str | None:
         """Classify event type by embedding similarity.
 
-        Returns the best-matching event type, or ``"environment"`` as fallback.
+        Returns the best-matching event type, or ``None`` if no type exceeds
+        the similarity threshold.
         """
         import numpy as np
 
         if not self._event_vectors:
-            return "environment"
+            return None
 
         try:
             embed_fn = self.memory._embedding_fn
             input_vecs = embed_fn([user_input])
             if not input_vecs or len(input_vecs) == 0:
-                return "environment"
+                return None
 
             input_vec = np.array(input_vecs[0])
-            best_type = "environment"
+            best_type = None
             best_sim = -1.0
             for event_type, center_vec in self._event_vectors.items():
                 sim = np.dot(input_vec, center_vec) / (
@@ -329,10 +330,10 @@ class GameMaster:
                     best_type = event_type
 
             if best_sim < _EVENT_SIMILARITY_THRESHOLD:
-                return "environment"
+                return None
             return best_type
         except Exception:
-            return "environment"
+            return None
 
     def _handle_event(self, user_input: str) -> str:
         """处理事件触发意图。
@@ -341,6 +342,8 @@ class GameMaster:
         进行判定，返回判定结果叙事描述。
         """
         trigger_type = self._classify_event(user_input)
+        if trigger_type is None:
+            trigger_type = "environment"
 
         if self.debug:
             print(f"[DEBUG] 事件分类: {trigger_type}")
@@ -761,13 +764,15 @@ class GameMaster:
     # ------------------------------------------------------------------
 
     def process(self, user_input: str) -> str:
-        """单轮对话处理入口。
+        """单轮对话处理入口 — 三层判定管线。
 
         流程
         ----
-        1. 意图识别（正则）
-        2. 分发到对应的 handler
-        3. 返回回复文本
+        1. 正则判定：dice / info / event → 直接路由
+        2. 正则判定为 dialogue → embedding 判定
+        3. embedding 匹配事件 → 事件处理
+        4. embedding 未匹配 → LLM (GM Agent) 最终判定
+        5. LLM 判定为对话 → NPC 对话管线
 
         Parameters
         ----------
@@ -788,8 +793,9 @@ class GameMaster:
         if self.debug:
             print(f"\n{'─'*50}")
             print(f"[DEBUG] 玩家输入: {user_input}")
-            print(f"[DEBUG] 意图: {intent}")
+            print(f"[DEBUG] 正则意图: {intent}")
 
+        # ---- Tier 1: 正则直接路由 ----
         if intent == "dice":
             response = self._handle_dice(user_input)
             self._update_state_from_keywords(user_input)
@@ -800,8 +806,17 @@ class GameMaster:
             response = self._handle_event(user_input)
             self._update_state_from_keywords(user_input)
         else:
-            # dialogue handler 内部已包含 Step 5 状态更新
-            response = self._handle_dialogue(user_input)
+            # ---- Tier 2: embedding 判定 ----
+            event_type = self._classify_event(user_input)
+            if self.debug:
+                print(f"[DEBUG] embedding 分类: {event_type or '无匹配'}")
+            if event_type is not None:
+                # embedding 匹配到具体事件类型 → 事件处理
+                response = self._handle_event(user_input)
+                self._update_state_from_keywords(user_input)
+            else:
+                # ---- Tier 3: LLM (GM Agent) 最终判定 ----
+                response = self._handle_dialogue(user_input)
 
         if self.debug:
             state = self.state.get_state()
