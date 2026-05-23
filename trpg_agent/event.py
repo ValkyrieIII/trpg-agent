@@ -69,6 +69,8 @@ def resolve_trigger(
         return _resolve_npc_reaction(state)
     elif trigger_type == "discovery":
         return _resolve_discovery(character, context)
+    elif trigger_type == "combat":
+        return _resolve_combat(state)
     else:
         return {
             "outcome": "unknown_trigger",
@@ -159,6 +161,27 @@ def _resolve_npc_reaction(state: Any) -> dict[str, Any]:
             "outcome": "hostile",
             "state_changes": [],
             "narrative": "NPC 态度敌对，随时可能攻击",
+        }
+
+
+def _resolve_combat(state: Any) -> dict[str, Any]:
+    """Combat trigger — difficulty check DC 12.
+
+    On failure, applies ``"combat"`` to the state machine (reduces stamina).
+    """
+    result = difficulty_check(dc=12)
+    if result["success"]:
+        return {
+            "outcome": "success",
+            "state_changes": [],
+            "narrative": "战斗判定成功 — 攻击命中",
+        }
+    else:
+        state.apply("combat")
+        return {
+            "outcome": "failure",
+            "state_changes": ["combat"],
+            "narrative": "战斗判定失败 — 攻击落空",
         }
 
 

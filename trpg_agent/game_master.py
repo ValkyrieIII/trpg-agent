@@ -62,15 +62,16 @@ _KEYWORD_TRIGGERS: Dict[str, List[str]] = {
 #  Event keyword -> trigger_type mapping
 # ---------------------------------------------------------------------------
 
-_EVENT_KEYWORDS: Dict[str, str] = {
-    "陷阱": "trap",
-    "环境": "environment",
-    "发现": "discovery",
-    "线索": "discovery",
-    "NPC": "npc_reaction",
-    "npc": "npc_reaction",
-    "反应": "npc_reaction",
+_EVENT_DESCRIPTIONS: Dict[str, str] = {
+    "combat":        "战斗 攻击 砍杀 挥拳 刺杀 开打 揍 干掉 出手 拔刀 射箭 冲锋",
+    "trap":          "陷阱 机关 暗器 触发陷阱 踩到 触发机关 中招",
+    "environment":   "环境 天气 地形 攀爬 涉水 寒冷 酷热 暴风雪 迷雾",
+    "discovery":     "发现 线索 搜索 观察 调查 仔细看 找线索 检查 侦查",
+    "npc_reaction":  "NPC反应 对话 交涉 说服 恐吓 谈判 套话 打听",
 }
+
+# Minimum cosine similarity to accept an event match
+_EVENT_SIMILARITY_THRESHOLD: float = 0.4
 
 # ---------------------------------------------------------------------------
 #  Action -> check rules  (hardcoded regex — no LLM)
@@ -159,6 +160,10 @@ class GameMaster:
         except (RuntimeError, Exception):
             pass
 
+        # -- Event embedding vectors (pre-computed once) --
+        self._event_vectors: Dict[str, Any] = {}
+        self._init_event_vectors()
+
         # -- Player conversation history --
         self.max_history: int = 10
         self.player_history: List[Dict[str, str]] = []
@@ -232,18 +237,63 @@ class GameMaster:
             f"体力：{state['stamina']}"
         )
 
+    # ------------------------------------------------------------------
+    #  Embedding-based event routing
+    # ------------------------------------------------------------------
+
+    def _init_event_vectors(self) -> None:
+        """Pre-compute event description embeddings for fast similarity matching."""
+        import numpy as np
+
+        try:
+            embed_fn = self.memory._embedding_fn
+            for event_type, desc in _EVENT_DESCRIPTIONS.items():
+                vectors = embed_fn([desc])
+                if vectors and len(vectors) > 0:
+                    self._event_vectors[event_type] = np.array(vectors[0])
+        except Exception:
+            pass
+
+    def _classify_event(self, user_input: str) -> str:
+        """Classify event type by embedding similarity.
+
+        Returns the best-matching event type, or ``"environment"`` as fallback.
+        """
+        import numpy as np
+
+        if not self._event_vectors:
+            return "environment"
+
+        try:
+            embed_fn = self.memory._embedding_fn
+            input_vecs = embed_fn([user_input])
+            if not input_vecs or len(input_vecs) == 0:
+                return "environment"
+
+            input_vec = np.array(input_vecs[0])
+            best_type = "environment"
+            best_sim = -1.0
+            for event_type, center_vec in self._event_vectors.items():
+                sim = np.dot(input_vec, center_vec) / (
+                    np.linalg.norm(input_vec) * np.linalg.norm(center_vec)
+                )
+                if sim > best_sim:
+                    best_sim = sim
+                    best_type = event_type
+
+            if best_sim < _EVENT_SIMILARITY_THRESHOLD:
+                return "environment"
+            return best_type
+        except Exception:
+            return "environment"
+
     def _handle_event(self, user_input: str) -> str:
         """处理事件触发意图。
 
-        通过关键词匹配确定触发类型，调用 :func:`event.resolve_trigger` 进行判定，
-        返回判定结果叙事描述。
+        通过 embedding 语义相似度确定触发类型，调用 :func:`event.resolve_trigger`
+        进行判定，返回判定结果叙事描述。
         """
-        # 默认触发类型
-        trigger_type = "environment"
-        for keyword, tt in _EVENT_KEYWORDS.items():
-            if keyword in user_input:
-                trigger_type = tt
-                break
+        trigger_type = self._classify_event(user_input)
 
         result = resolve_trigger(
             trigger_type=trigger_type,
