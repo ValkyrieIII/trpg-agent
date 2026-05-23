@@ -269,11 +269,15 @@ class GameMaster:
         skill_or_dc = action["skill_or_dc"]
         mod = action["modifier"]
         action_desc = action["action_desc"]
-        action_key = action["action_key"]
 
         if check_type == "skill":
             skill_name = skill_or_dc
-            skill_value = self.character.skills.get(skill_name, 50)
+            # skills 是 list[dict]，查找匹配技能名
+            skill_value = 50
+            for s in self.character.skills:
+                if s["name"] == skill_name:
+                    skill_value = s["value"]
+                    break
             result = skill_check(skill_value, mod)
             check_label = f"{skill_name}检定"
             target_str = str(skill_value)
