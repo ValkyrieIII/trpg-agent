@@ -9,7 +9,7 @@ class LLM:
 
     def __init__(
         self,
-        model: str = "deepseek-chat",
+        model: str = "deepseek-v4-pro",
         base_url: str = "https://api.deepseek.com",
     ):
         api_key = os.environ.get("DEEPSEEK_API_KEY")
