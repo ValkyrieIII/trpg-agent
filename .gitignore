@@ -30,3 +30,4 @@ Thumbs.db
 
 # Git 工作树
 .worktrees/
+.claude/

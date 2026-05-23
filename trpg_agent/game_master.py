@@ -139,7 +139,7 @@ class GameMaster:
         # -- Subsystems --
         self.state = StateMachine()
         # NOTE: MemoryStore 和 KnowledgeBase 各自内部创建了
-        # SentenceTransformerEmbeddingFunction("all-MiniLM-L6-v2") 。
+        # SentenceTransformerEmbeddingFunction("BAAI/bge-small-zh-v1.5") 。
         # 由于 sentence-transformers 库自带模型级缓存，实际上并没有重复
         # 加载模型，此处不做特殊共享处理。
         self.memory = MemoryStore()

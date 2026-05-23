@@ -92,7 +92,7 @@ class KnowledgeBase:
 
         self._client = chromadb.PersistentClient(path=persist_dir)
         self._embedding_fn = SentenceTransformerEmbeddingFunction(
-            model_name="all-MiniLM-L6-v2",
+            model_name="BAAI/bge-small-zh-v1.5",
         )
         self._collection = self._client.get_or_create_collection(
             name="knowledge",
