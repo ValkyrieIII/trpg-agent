@@ -23,6 +23,7 @@ import re
 from typing import Any, Dict, List, Optional
 
 from trpg_agent.character import Character
+from trpg_agent.check import difficulty_check, skill_check
 from trpg_agent.dice import roll
 from trpg_agent.event import resolve_trigger
 from trpg_agent.llm import LLM
@@ -66,6 +67,29 @@ _EVENT_KEYWORDS: Dict[str, str] = {
     "npc": "npc_reaction",
     "反应": "npc_reaction",
 }
+
+# ---------------------------------------------------------------------------
+#  Action -> check rules  (hardcoded regex — no LLM)
+# ---------------------------------------------------------------------------
+# Each entry: (regex_pattern, check_type, skill_or_dc, modifier)
+#   check_type="skill" → skill_check(skill_value, mod)
+#   check_type="check" → difficulty_check(dc, mod)
+
+_ACTION_RULES: list[tuple[str, str, object, int]] = [
+    (r"(攀爬|爬[上去过]|翻[越墙]|攀登).+", "check", 12, 0),
+    (r"(追踪|跟踪|尾行|寻找踪迹|找到踪迹).+", "skill", "追踪", 0),
+    (r"(潜行|隐藏|躲[起来藏]|埋伏).+", "skill", "潜行", 0),
+    (r"(说服|交涉|谈判|威吓|忽悠|骗).+", "check", 15, 0),
+    (r"(撬锁|开锁|解锁|解除机关).+", "skill", "巧手", 0),
+    (r"(搜索|搜查|调查|观察|仔细看|找线索|找找).+", "skill", "侦查", 0),
+    (r"(跳跃|跳[过去]|跃过).+", "check", 12, 0),
+    (r"(搬运|推[开门]|举[起重]|砸).+", "check", 13, 0),
+    (r"(射击|射箭|瞄准|拉弓).+", "skill", "弓箭", 0),
+    (r"(闪避|躲避|回避|躲开).+", "check", 14, 0),
+    (r"(游泳|涉水|过河|渡河).+", "check", 12, 0),
+    (r"(忍耐|抵抗|坚持|硬撑).+", "check", 13, 0),
+    (r"(攀岩|攀上|抓住).+", "check", 14, 0),
+]
 
 
 # ===================================================================
@@ -218,28 +242,112 @@ class GameMaster:
 
         return narrative
 
+    # ------------------------------------------------------------------
+    #  Action matching & check execution
+    # ------------------------------------------------------------------
+
+    def _match_action(self, user_input: str) -> dict | None:
+        """硬编码正则匹配行动，返回检定参数。无匹配返回 None。"""
+        for pattern, check_type, skill_or_dc, mod in _ACTION_RULES:
+            m = re.search(pattern, user_input)
+            if m:
+                action_desc = m.group(0)
+                # 提取行动关键词
+                action_key = m.group(1) if m.lastindex else action_desc
+                return {
+                    "action_desc": action_desc,
+                    "action_key": action_key,
+                    "check_type": check_type,
+                    "skill_or_dc": skill_or_dc,
+                    "modifier": mod,
+                }
+        return None
+
+    def _execute_check(self, action: dict) -> dict:
+        """执行检定，返回检定结果叙事片段。"""
+        check_type = action["check_type"]
+        skill_or_dc = action["skill_or_dc"]
+        mod = action["modifier"]
+        action_desc = action["action_desc"]
+        action_key = action["action_key"]
+
+        if check_type == "skill":
+            skill_name = skill_or_dc
+            skill_value = self.character.skills.get(skill_name, 50)
+            result = skill_check(skill_value, mod)
+            check_label = f"{skill_name}检定"
+            target_str = str(skill_value)
+        else:
+            dc = int(skill_or_dc)
+            result = difficulty_check(dc, mod)
+            check_label = f"难度检定 DC{dc}"
+            target_str = str(dc)
+
+        if result["success"]:
+            return {
+                "success": True,
+                "narrative": (
+                    f"【行动】{action_desc}\n"
+                    f"【{check_label}】{result['detail']}"
+                ),
+            }
+        else:
+            return {
+                "success": False,
+                "stamina_cost": True,
+                "narrative": (
+                    f"【行动】{action_desc}\n"
+                    f"【{check_label}】{result['detail']}"
+                ),
+            }
+
     def _handle_dialogue(self, user_input: str) -> str:
         """处理对话意图 — 完整对话管线。
 
         步骤
         ----
-        1. 检索记忆 + 知识
-        2. 组装 system prompt（人格 + 状态 + 知识 + 记忆）
-        3. 组装 messages（最近历史）
-        4. 调用 LLM.chat()（不可用时返回占位字符串）
-        5. 关键词触发状态更新
-        6. LLM.extract_memory() -> memory.add()（占位，跳过）
-        7. 更新对话历史
+        0. 硬编码匹配行动 → 触发检定（无匹配则跳过）
+        1. 执行检定（Python，复用 check.py）
+        2. 检索记忆 + 知识
+        3. 组装 system prompt（人格 + 检定结果 + 状态 + 知识 + 记忆）
+        4. 组装 messages（最近历史）
+        5. 调用 LLM.chat()（一次完成旁白+角色对话）
+        6. 关键词触发状态更新 + 检定失败扣体力
+        7. 记录记忆
+        8. 更新对话历史
         """
-        # ---- Step 1: 检索 ----
+        # ---- Step 0: 硬编码匹配行动 ----
+        action = self._match_action(user_input)
+
+        # ---- Step 1: 执行检定（仅当匹配到行动时） ----
+        check_result = None
+        if action:
+            check_result = self._execute_check(action)
+
+        # ---- Step 2: 检索 ----
         memories = self.memory.full_retrieve(user_input)
         knowledge = self.knowledge.query(user_input, self.character.name)
 
-        # ---- Step 2: 组装 system prompt ----
+        # ---- Step 3: 组装 system prompt ----
         system_parts: List[str] = [
             self.character.build_personality_prompt(),
             self.character.build_state_prompt(self.state.get_state()),
         ]
+
+        # 检定结果 → GM 叙述指令
+        if check_result:
+            system_parts.append(
+                "## GM 检定结果\n"
+                f"{check_result['narrative']}\n\n"
+                "请在回复中用第三人称叙述这个行动的过程和结果，空行后以角色身份说话。\n"
+                "检定成功 → 描述动作利落完成\n"
+                "检定失败 → 描述动作失败或遭遇困难"
+            )
+        else:
+            system_parts.append(
+                "## 纯对话模式\n"
+                "玩家在进行对话或社交，不需要旁白叙述。直接以角色身份回应。"
+            )
 
         if knowledge:
             system_parts.append("【相关知识】")
@@ -252,11 +360,11 @@ class GameMaster:
 
         system_prompt = "\n\n".join(system_parts)
 
-        # ---- Step 3: 组装 messages ----
+        # ---- Step 4: 组装 messages ----
         messages: List[Dict[str, str]] = list(self.history)
         messages.append({"role": "user", "content": user_input})
 
-        # ---- Step 4: 调用 LLM ----
+        # ---- Step 5: 调用 LLM ----
         if self._llm_available and self.llm is not None:
             try:
                 response = self.llm.chat(system=system_prompt, messages=messages)
@@ -265,15 +373,18 @@ class GameMaster:
         else:
             response = "LLM 模块尚未实现"
 
-        # ---- Step 5: 状态更新（关键词触发） ----
+        # ---- Step 6: 状态更新 ----
         combined = f"{user_input} {response}"
         for trigger, keywords in _KEYWORD_TRIGGERS.items():
             for kw in keywords:
                 if kw in combined:
                     self.state.apply(trigger)
                     break
+        # 检定失败 → 消耗体力
+        if check_result and check_result.get("stamina_cost"):
+            self.state.apply("combat")
 
-        # ---- Step 6: 记录记忆（占位 — extract_memory 返回空字符串时跳过） ----
+        # ---- Step 7: 记录记忆 ----
         if self._llm_available and self.llm is not None:
             try:
                 extracted = self.llm.extract_memory(
@@ -290,7 +401,7 @@ class GameMaster:
                 context={"emotion": self.state.get_state()["emotion"]},
             )
 
-        # ---- Step 7: 更新对话历史 ----
+        # ---- Step 8: 更新对话历史 ----
         self.history.append({"role": "user", "content": user_input})
         self.history.append({"role": "assistant", "content": response})
 
