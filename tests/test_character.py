@@ -1,4 +1,4 @@
-"""Tests for the character module — YAML loading, validation, and prompt building."""
+"""Tests for the character module — YAML loading, validation, and summary."""
 
 import sys
 
