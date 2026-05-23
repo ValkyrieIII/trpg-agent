@@ -461,6 +461,28 @@ class NPCStore:
         if len(self._histories[name]) > max_turns:
             self._histories[name] = self._histories[name][-max_turns:]
 
+    def clear_history(self, name: str | None = None) -> int:
+        """Clear NPC conversation history.
+
+        Parameters
+        ----------
+        name : str or None
+            NPC name to clear, or ``None`` to clear all.
+
+        Returns
+        -------
+        int
+            Number of NPCs whose history was cleared.
+        """
+        if name is None:
+            count = len(self._histories)
+            self._histories.clear()
+            return count
+        if name in self._histories:
+            del self._histories[name]
+            return 1
+        return 0
+
     # ------------------------------------------------------------------
     #  Internal
     # ------------------------------------------------------------------

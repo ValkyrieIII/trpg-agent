@@ -116,6 +116,19 @@ def main() -> None:
                     reply = "请指定骰子表达式，例如：/dice 3d6"
                 else:
                     reply = gm.process(f"掷骰 {expr}")
+            elif user_input.startswith("/clear_npc"):
+                arg = user_input[len("/clear_npc") :].strip()
+                if not arg:
+                    reply = "用法：/clear_npc <NPC名称> 或 /clear_npc all"
+                elif arg.lower() == "all":
+                    count = gm.npc_store.clear_history()
+                    reply = f"已清除全部 {count} 个 NPC 的对话记忆。"
+                else:
+                    count = gm.npc_store.clear_history(arg)
+                    if count:
+                        reply = f"已清除 [{arg}] 的对话记忆。"
+                    else:
+                        reply = f"未找到 NPC [{arg}]。"
             else:
                 reply = f"未知命令：{user_input}"
         else:
