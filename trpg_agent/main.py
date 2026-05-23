@@ -13,6 +13,16 @@ from __future__ import annotations
 import os
 import sys
 
+# 兼容直接执行和模块运行两种方式
+if __name__ == "__main__":
+    _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if _project_root not in sys.path:
+        sys.path.insert(0, _project_root)
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
 from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Prompt
