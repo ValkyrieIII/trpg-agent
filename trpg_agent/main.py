@@ -64,18 +64,21 @@ def main() -> None:
         )
         sys.exit(1)
 
-    character_name = gm.character.name
+    player_name = gm.player.name
+    world_name = gm.world.get("name", "未知世界")
 
     # ---- Welcome panel ----
     console.print(
         Panel(
-            f"[bold cyan]{character_name}[/bold cyan] 已经准备好踏上冒险了。\n\n"
+            f"你扮演 [bold cyan]{player_name}[/bold cyan]，身处[bold]{world_name}[/bold]。\n\n"
             "可用命令：\n"
             "  [green]/dice <表达式>[/green]  投掷骰子（如 [green]/dice 3d6[/green]）\n"
-            "  [green]exit[/green] / [green]quit[/green] / [green]退出[/green]  结束游戏\n\n"
-            "也可以直接输入对话内容与角色互动。",
+            "  [green]查看状态[/green]  查看角色属性和当前状态\n"
+            "  [green]exit[/green] / [green]quit[/green] / [green]退出[/green]  结束冒险\n\n"
+            "用括号声明行动，如 [dim](我拔出弓箭，瞄准远处的兽人)[/dim]。\n"
+            "也可以直接对 NPC 说话，如 [dim]老马，来杯麦酒[/dim]。",
             title="[bold]TRPG Agent[/bold]",
-            subtitle=f"欢迎，{character_name}",
+            subtitle=f"你是 {player_name}",
             border_style="bright_blue",
         )
     )
@@ -115,7 +118,7 @@ def main() -> None:
         console.print(
             Panel(
                 reply,
-                title=f"[bold]{character_name}[/bold]",
+                title="[bold]冒险日志[/bold]",
                 border_style="green",
             )
         )

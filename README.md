@@ -1,13 +1,20 @@
 # TRPG Agent
 
-单双 Agent 跑团应用。GM 负责叙述和裁定，角色负责对话。
+AI 驱动的单人跑团应用。玩家扮演角色冒险，AI 担任 GM（叙事/检定）+ NPC 扮演。
 
 ## 架构
 
 ```
-玩家输入 → GM Agent(场景叙述+检定) → 角色 Agent(对话)
-              ↑                           ↑
-         system: "你是DM"           system: 角色卡(config.yaml)
+玩家（扮演角色）
+    │
+   输入（行动/对话）
+    │
+    ▼
+GM Agent（叙事中枢 + 检定裁判）
+    │
+    ├── 场景叙述（第三人称）
+    ├── 检定判定与执行
+    └── NPC 回应 → 独立 NPC Agent（角色卡 system prompt）
 ```
 
 ## 目录
@@ -15,8 +22,9 @@
 ```
 trpg_agent/
 ├── main.py          CLI 入口 (Rich)
-├── game_master.py   GM 核心 (双 Agent 管线)
-├── character.py     角色卡 (YAML → prompt)
+├── game_master.py   GM 核心（调度中枢）
+├── character.py     玩家角色卡 (YAML → dataclass)
+├── npc.py           NPC 角色卡 + ChromaDB 持久化
 ├── state.py         状态机 (情绪/信任/体力)
 ├── dice.py          骰子 (d20/d100/ndm+k)
 ├── check.py         检定 (技能/难度/对抗)
@@ -24,7 +32,8 @@ trpg_agent/
 ├── llm.py           LLM 封装 (DeepSeek, OpenAI SDK)
 ├── memory.py        记忆 (ChromaDB + NetworkX 图)
 └── rag.py           知识库 (角色权限过滤)
-config.yaml          角色 & 知识配置
+config.yaml          玩家角色 & 世界设定
+data/npcs/           NPC 角色卡 (.yaml)
 data/knowledge/      世界观知识文件 (.md)
 ```
 
@@ -39,13 +48,8 @@ echo HF_ENDPOINT=https://hf-mirror.com >> .env
 python trpg_agent/main.py
 ```
 
-## 记忆系统
-
-- **GM 叙述不写入当前记忆** — 仅角色对话进入 MemoryStore
-- GM 会重复场景叙述的风险：TODO: 拆分为世界记忆(GM) + 角色记忆(NPC)
-
 ## 测试
 
 ```bash
-pytest tests/test_dice.py tests/test_character.py tests/test_state.py tests/test_check.py tests/test_event.py -v
+pytest tests/ -v
 ```
