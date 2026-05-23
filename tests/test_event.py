@@ -25,12 +25,6 @@ def _make_character(skills: list | None = None) -> Character:
     return Character(
         name="TestChar",
         core=["A test character."],
-        personality={
-            "tone": "neutral",
-            "verbal_tics": "none",
-            "emotion_map": {},
-            "catchphrases": [],
-        },
         attributes={"strength": 10},
         skills=skills or [],
     )
