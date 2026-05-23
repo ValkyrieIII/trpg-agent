@@ -74,10 +74,13 @@ def main() -> None:
     player_name = gm.player.name
     world_name = gm.world.get("name", "未知世界")
 
+    # ---- Generate opening scene ----
+    opening = gm.generate_opening()
+
     # ---- Welcome panel ----
     console.print(
         Panel(
-            f"你扮演 [bold cyan]{player_name}[/bold cyan]，身处[bold]{world_name}[/bold]。\n\n"
+            f"[bold cyan]{player_name}[/bold cyan]，身处[bold]{world_name}[/bold]。\n\n"
             "可用命令：\n"
             "  [green]/dice <表达式>[/green]  投掷骰子（如 [green]/dice 3d6[/green]）\n"
             "  [green]查看状态[/green]  查看角色属性和当前状态\n"
@@ -89,6 +92,16 @@ def main() -> None:
             border_style="bright_blue",
         )
     )
+
+    # ---- Display opening scene ----
+    if opening:
+        console.print(
+            Panel(
+                opening,
+                title="[bold]开场[/bold]",
+                border_style="yellow",
+            )
+        )
 
     # ---- Main interaction loop ----
     while True:

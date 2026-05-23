@@ -225,6 +225,51 @@ class GameMaster:
         parts.append(f" = {total}")
         return "".join(parts)
 
+    def generate_opening(self) -> str:
+        """Generate the opening scene narration based on world, player, and memories.
+
+        Returns a GM-narrated opening to display when the game starts.
+        """
+        if not self._llm_available or not self.llm:
+            world_name = self.world.get("name", "未知世界")
+            return (
+                f"欢迎来到{world_name}。你是{self.player.name}。\n"
+                f"冒险即将开始..."
+            )
+
+        world_desc = self.world.get("description", self.world.get("name", ""))
+        player_desc = "，".join(self.player.core)
+        player_card = self.player.summary()
+
+        # Query for any existing memories (returning player)
+        memories = self.memory.search("冒险 故事 经历", n=5)
+        memory_text = ""
+        if memories:
+            memory_text = "\n".join(f"- {m['content']}" for m in memories[:5])
+
+        system = (
+            f"你是 TRPG 地下城主。\n"
+            f"玩家扮演 {self.player.name}，{player_desc}\n"
+            f"世界：{world_desc}\n\n"
+            f"请为这次冒险写一段开场白（不超过200字）：\n"
+            f"- 设定场景氛围和起始地点\n"
+            f"- 用第二人称「你」称呼玩家\n"
+            f"- 让玩家知道周围环境，暗示可能的行动方向\n"
+        )
+
+        if memory_text:
+            system += (
+                f"\n以下是之前的冒险记录，请据此生成连续的开场：\n{memory_text}"
+            )
+
+        messages = [{"role": "user", "content": "请开始冒险。"}]
+
+        try:
+            narration = self.llm.chat(system=system, messages=messages)
+            return narration
+        except Exception:
+            return f"你站在{world_desc}的边缘，冒险即将开始。"
+
     def _handle_info(self) -> str:
         """处理角色信息/状态查询意图。
 
