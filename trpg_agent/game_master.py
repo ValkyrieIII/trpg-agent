@@ -403,9 +403,10 @@ class GameMaster:
 
         if gm_narration:
             char_prompt += (
-                f"\n\n## GM旁白\n"
+                f"\n\n## 场景叙述\n"
                 f"{gm_narration}\n\n"
-                f"GM已经描述了场景。以{name}的身份回应玩家，不要复述GM的内容。"
+                f"以上是GM描述的场景。请以{name}的身份自然回应玩家。"
+                f"不要在你的回复中加前缀或标签，直接说话。"
             )
 
         char_messages.append({"role": "user", "content": user_input})
@@ -419,10 +420,14 @@ class GameMaster:
             char_reply = "LLM 模块尚未实现"
 
         # ---- 组装输出 ----
+        # 清理 LLM 可能输出的前缀
+        clean_reply = re.sub(r'^\s*\[' + re.escape(name) + r'\]\s*[:：]?\s*', '', char_reply)
+        clean_reply = re.sub(r'^\s*\[GM\]\s*[:：]?\s*', '', clean_reply)
+
         if gm_narration:
-            response = f"[GM]: {gm_narration}\n\n[{name}]: {char_reply}"
+            response = f"[GM]: {gm_narration}\n\n[{name}]: {clean_reply}"
         else:
-            response = f"[{name}]: {char_reply}"
+            response = f"[{name}]: {clean_reply}"
 
         # ---- Step 5: 状态更新 ----
         combined = f"{user_input} {gm_narration} {char_reply}"
