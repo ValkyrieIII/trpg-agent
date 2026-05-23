@@ -28,11 +28,11 @@ def main() -> None:
     config_path = os.environ.get("TRPG_CONFIG", "config.yaml")
 
     # ---- Check API key early and warn ----
-    if not os.environ.get("ANTHROPIC_API_KEY"):
+    if not os.environ.get("DEEPSEEK_API_KEY"):
         console.print()
         console.print(
             Panel(
-                "[yellow]ANTHROPIC_API_KEY 环境变量未设置。[/yellow]\n"
+                "[yellow]DEEPSEEK_API_KEY 环境变量未设置。[/yellow]\n"
                 "LLM 对话功能将不可用，但骰子、角色信息和事件判定可以正常使用。\n"
                 "请设置环境变量后重启以获得完整功能。",
                 title="[bold]提示[/bold]",

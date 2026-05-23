@@ -1,18 +1,21 @@
-"""LLM 封装 — Claude API 对话与事件抽取。"""
+"""LLM 封装 — DeepSeek API 对话与事件抽取。"""
 
 import os
-
-from anthropic import Anthropic
+from openai import OpenAI
 
 
 class LLM:
-    """Claude API 封装，提供对话和事件抽取两个能力。"""
+    """DeepSeek API 封装（OpenAI 兼容格式）。"""
 
-    def __init__(self, model: str = "claude-sonnet-4-6"):
-        api_key = os.environ.get("ANTHROPIC_API_KEY")
+    def __init__(
+        self,
+        model: str = "deepseek-chat",
+        base_url: str = "https://api.deepseek.com",
+    ):
+        api_key = os.environ.get("DEEPSEEK_API_KEY")
         if not api_key:
-            raise RuntimeError("ANTHROPIC_API_KEY 环境变量未设置")
-        self.client = Anthropic(api_key=api_key)
+            raise RuntimeError("DEEPSEEK_API_KEY 环境变量未设置")
+        self.client = OpenAI(api_key=api_key, base_url=base_url)
         self.model = model
 
     def chat(self, system: str, messages: list[dict]) -> str:
@@ -20,16 +23,18 @@ class LLM:
 
         API 调用失败时重试一次（共两次机会），两次都失败则抛出 RuntimeError。
         """
+        full_messages = [{"role": "system", "content": system}]
+        full_messages.extend(messages)
+
         last_error = None
         for attempt in range(2):
             try:
-                resp = self.client.messages.create(
+                resp = self.client.chat.completions.create(
                     model=self.model,
-                    system=system,
-                    messages=messages,
+                    messages=full_messages,
                     max_tokens=4096,
                 )
-                return resp.content[0].text
+                return resp.choices[0].message.content
             except Exception as e:
                 last_error = e
         raise RuntimeError(f"API 调用失败（已重试一次）: {last_error}")

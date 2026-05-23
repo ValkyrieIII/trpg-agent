@@ -80,7 +80,7 @@ class GameMaster:
     config_path : str
         角色 YAML 配置文件路径。
     llm_api_key : str, optional
-        LLM API 密钥。若为 ``None`` 则从环境变量 ``ANTHROPIC_API_KEY`` 读取。
+        LLM API 密钥。若为 ``None`` 则从环境变量 ``DEEPSEEK_API_KEY`` 读取。
         当 API 密钥不可用时，LLM 操作自动降级为占位符行为。
     knowledge_dir : str, optional
         知识文件所在目录，默认为 ``"data/knowledge"``。
@@ -109,7 +109,7 @@ class GameMaster:
 
         # -- LLM (graceful fallback to placeholder) --
         if llm_api_key is not None:
-            os.environ["ANTHROPIC_API_KEY"] = llm_api_key
+            os.environ["DEEPSEEK_API_KEY"] = llm_api_key
 
         self.llm: Optional[LLM] = None
         self._llm_available = False
