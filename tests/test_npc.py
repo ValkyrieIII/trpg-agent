@@ -22,16 +22,21 @@ def complete_npc_yaml(tmp_path):
     data = {
         "npc": {
             "name": "老李",
+            "pathway": "观众",
+            "sequence": 8,
             "core": [
                 "酒馆老板，年过五旬",
                 "见多识广，消息灵通",
                 "表面热情实则精明",
             ],
             "attributes": {
-                "strength": 10,
-                "agility": 8,
-                "intelligence": 14,
-                "willpower": 12,
+                "力量": 10,
+                "敏捷": 8,
+                "体质": 11,
+                "智力": 14,
+                "感知": 16,
+                "魅力": 12,
+                "灵性": 13,
             },
             "skills": [
                 {"name": "说服", "value": 70},
@@ -75,7 +80,7 @@ def minimal_npc_yaml(tmp_path):
         "npc": {
             "name": "路人甲",
             "core": ["一个普通的路人"],
-            "attributes": {"strength": 10},
+            "attributes": {"力量": 10},
             "personality": {
                 "tone": "平淡",
                 "verbal_tics": "无",
@@ -103,7 +108,7 @@ class TestLoadNPC:
         npc = load_npc(complete_npc_yaml)
         assert npc.name == "老李"
         assert len(npc.core) == 3
-        assert npc.attributes["agility"] == 8
+        assert npc.attributes["敏捷"] == 8
         assert len(npc.skills) == 2
         assert npc.skills[0]["name"] == "说服"
         assert npc.personality["tone"] == "温和热情"
@@ -111,6 +116,18 @@ class TestLoadNPC:
         assert npc.personality["emotion_map"]["calm"] == "笑眯眯地擦着酒杯"
         assert len(npc.few_shot) == 2
         assert npc.few_shot[0]["input"] == "老板，最近有什么新闻吗？"
+
+    def test_npc_pathway_loaded(self, complete_npc_yaml):
+        """Pathway and sequence should be loaded from NPC YAML."""
+        npc = load_npc(complete_npc_yaml)
+        assert npc.pathway == "观众"
+        assert npc.sequence == 8
+
+    def test_npc_backward_compatible(self, minimal_npc_yaml):
+        """Old NPC YAML without pathway should default to empty/0."""
+        npc = load_npc(minimal_npc_yaml)
+        assert npc.pathway == ""
+        assert npc.sequence == 0
 
     def test_load_class_method(self, complete_npc_yaml):
         """NPCCharacter.load() class method should behave identically."""
@@ -130,7 +147,7 @@ class TestLoadNPC:
         data = {
             "npc": {
                 "core": ["测试"],
-                "attributes": {"strength": 10},
+                "attributes": {"力量": 10},
                 "personality": {"tone": "平淡", "verbal_tics": "无", "emotion_map": {}},
             }
         }
@@ -259,6 +276,21 @@ class TestBuildStatePrompt:
         assert "fresh" in prompt
         assert "笑眯眯地擦着酒杯" in prompt
 
+    def test_state_prompt_contains_pathway(self, complete_npc_yaml):
+        """State prompt should include pathway info when available."""
+        npc = load_npc(complete_npc_yaml)
+        state = {"emotion": "calm", "trust": 0.5, "stamina": "fresh"}
+        prompt = npc.build_state_prompt(state)
+        assert "观众" in prompt
+        assert "序列8" in prompt
+
+    def test_state_prompt_no_pathway_for_mundane(self, minimal_npc_yaml):
+        """State prompt for NPC without pathway should not include pathway line."""
+        npc = load_npc(minimal_npc_yaml)
+        state = {"emotion": "calm", "trust": 0.5, "stamina": "fresh"}
+        prompt = npc.build_state_prompt(state)
+        assert "非凡途径" not in prompt
+
 
 # ===================================================================
 #  NPCStore Tests
@@ -281,7 +313,7 @@ def sample_npc():
     return NPCCharacter(
         name="老李",
         core=["酒馆老板，年过五旬", "见多识广，消息灵通"],
-        attributes={"strength": 10, "agility": 8, "intelligence": 14},
+        attributes={"力量": 10, "敏捷": 8, "体质": 11, "智力": 14, "感知": 16, "魅力": 12, "灵性": 13},
         skills=[{"name": "说服", "value": 70}],
         personality={
             "tone": "温和热情",
@@ -296,6 +328,8 @@ def sample_npc():
         few_shot=[
             {"input": "老板，最近有什么新闻吗？", "output": "哎呀，您可问对人了。"},
         ],
+        pathway="观众",
+        sequence=8,
     )
 
 
@@ -305,7 +339,7 @@ def second_npc():
     return NPCCharacter(
         name="铁匠老王",
         core=["铁匠铺的老板", "力大无穷，性格豪爽"],
-        attributes={"strength": 18, "agility": 6, "intelligence": 10},
+        attributes={"力量": 18, "敏捷": 6, "体质": 16, "智力": 10, "感知": 8, "魅力": 10, "灵性": 8},
         skills=[{"name": "锻造", "value": 90}, {"name": "议价", "value": 40}],
         personality={
             "tone": "豪爽直率",
@@ -332,7 +366,7 @@ class TestSaveAndFindByName:
         found = store.find_by_name("老李")
         assert found is not None
         assert found.name == "老李"
-        assert found.attributes["intelligence"] == 14
+        assert found.attributes["智力"] == 14
         assert found.skills[0]["name"] == "说服"
         assert found.personality["tone"] == "温和热情"
         assert len(found.few_shot) == 1
@@ -348,14 +382,14 @@ class TestSaveAndFindByName:
         updated = NPCCharacter(
             name="老李",
             core=["更新后的背景"],
-            attributes={"strength": 99},
+            attributes={"力量": 99},
             personality={"tone": "updated", "verbal_tics": "updated", "emotion_map": {}},
         )
         store.save(updated)
         found = store.find_by_name("老李")
         assert found is not None
         assert found.core == ["更新后的背景"]
-        assert found.attributes["strength"] == 99
+        assert found.attributes["力量"] == 99
 
     def test_find_returns_correct_npc(self, store, sample_npc, second_npc):
         """Multiple NPCs saved, find returns the correct one."""
@@ -429,7 +463,7 @@ class TestAllNPCs:
         updated = NPCCharacter(
             name="老李",
             core=["updated"],
-            attributes={"strength": 99},
+            attributes={"力量": 99},
             personality={"tone": "t", "verbal_tics": "v", "emotion_map": {}},
         )
         store.save(updated)
@@ -448,7 +482,7 @@ class TestCreateDynamicNPC:
         npc = store.create(
             name="临时NPC",
             core=["动态创建的NPC"],
-            attributes={"strength": 10, "intelligence": 10},
+            attributes={"力量": 10, "智力": 10},
             skills=[{"name": "测试", "value": 50}],
             personality={
                 "tone": "友好",
@@ -464,7 +498,7 @@ class TestCreateDynamicNPC:
         store.create(
             name="临时NPC",
             core=["动态创建的NPC"],
-            attributes={"strength": 10},
+            attributes={"力量": 10},
             personality={"tone": "t", "verbal_tics": "v", "emotion_map": {}},
         )
         found = store.find_by_name("临时NPC")
@@ -476,7 +510,7 @@ class TestCreateDynamicNPC:
         npc = store.create(
             name="极简NPC",
             core=["最简单的NPC"],
-            attributes={"strength": 10},
+            attributes={"力量": 10},
         )
         assert npc.skills == []
         assert npc.personality == {}
@@ -551,7 +585,7 @@ class TestStorePersistence:
         assert store2.find_by_name("老李") is not None
         assert store2.find_by_name("铁匠老王") is not None
         assert len(store2.all()) == 2
-        assert store2.find_by_name("老李").attributes["intelligence"] == 14
+        assert store2.find_by_name("老李").attributes["智力"] == 14
 
     def test_restore_no_npcs(self, tmp_path):
         """Initialising a store in an empty directory should not error."""

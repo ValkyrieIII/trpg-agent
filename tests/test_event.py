@@ -319,3 +319,104 @@ class TestContextEdgeCases:
         monkeypatch.setattr("trpg_agent.check.roll", lambda _: ([12], 12))
         result = resolve_trigger("environment", _make_character(), StateMachine(max_hp=20))
         assert result["outcome"] == "success"
+
+
+# ====================================================================
+#  Madness Risk
+# ====================================================================
+
+
+class TestMadnessRisk:
+    """``trigger_type="madness_risk"`` — difficulty check + madness gain on failure."""
+
+    def test_madness_risk_success(self, monkeypatch):
+        """Roll >= DC → success, no madness gain."""
+        monkeypatch.setattr("trpg_agent.check.roll", lambda _: ([15], 15))
+        state = StateMachine(max_hp=20)
+        result = resolve_trigger(
+            "madness_risk", _make_character(), state, {"difficulty": 12}
+        )
+        assert result["outcome"] == "success"
+        assert result["state_changes"] == []
+        assert result["madness_increase"] == 0
+        assert "精神稳定" in result["narrative"]
+
+    def test_madness_risk_failure(self, monkeypatch):
+        """Roll < DC → madness gain, state gets 'horror'."""
+        monkeypatch.setattr("trpg_agent.check.roll", lambda _: ([5], 5))
+        state = StateMachine(max_hp=20)
+        result = resolve_trigger(
+            "madness_risk", _make_character(), state, {"difficulty": 12}
+        )
+        assert result["outcome"] == "madness_gain"
+        assert "horror" in result["state_changes"]
+        assert result["madness_increase"] == 5
+        assert "疯狂值+5" in result["narrative"]
+
+    def test_madness_risk_defaults(self, monkeypatch):
+        """Default difficulty=12, madness_delta=5."""
+        monkeypatch.setattr("trpg_agent.check.roll", lambda _: ([10], 10))
+        state = StateMachine(max_hp=20)
+        result = resolve_trigger("madness_risk", _make_character(), state)
+        assert result["outcome"] == "madness_gain"
+        assert result["madness_increase"] == 5
+
+    def test_madness_risk_custom_difficulty(self, monkeypatch):
+        """Custom difficulty and madness_delta."""
+        monkeypatch.setattr("trpg_agent.check.roll", lambda _: ([8], 8))
+        state = StateMachine(max_hp=20)
+        result = resolve_trigger(
+            "madness_risk",
+            _make_character(),
+            state,
+            {"difficulty": 18, "madness_delta": 8},
+        )
+        assert result["madness_increase"] == 8
+
+
+# ====================================================================
+#  Beyonder Power
+# ====================================================================
+
+
+class TestBeyonderPower:
+    """``trigger_type="beyonder_power"`` — always costs madness, harder check."""
+
+    def test_beyonder_power_success(self, monkeypatch):
+        """Roll >= DC → power works, always applies 'use_beyonder'."""
+        monkeypatch.setattr("trpg_agent.check.roll", lambda _: ([18], 18))
+        state = StateMachine(max_hp=20)
+        result = resolve_trigger(
+            "beyonder_power",
+            _make_character(),
+            state,
+            {"power_name": "灵摆占卜", "difficulty": 14},
+        )
+        assert result["outcome"] == "success"
+        assert "use_beyonder" in result["state_changes"]
+        assert result["madness_increase"] == 5
+        assert "灵摆占卜" in result["narrative"]
+
+    def test_beyonder_power_failure(self, monkeypatch):
+        """Roll < DC → power backfires, double madness cost."""
+        monkeypatch.setattr("trpg_agent.check.roll", lambda _: ([5], 5))
+        state = StateMachine(max_hp=20)
+        result = resolve_trigger(
+            "beyonder_power",
+            _make_character(),
+            state,
+            {"power_name": "梦境占卜"},
+        )
+        assert result["outcome"] == "failure"
+        assert "use_beyonder" in result["state_changes"]
+        assert "horror" in result["state_changes"]
+        assert result["madness_increase"] == 15
+        assert "失控反噬" in result["narrative"]
+
+    def test_beyonder_power_defaults(self, monkeypatch):
+        """Default power_name and difficulty."""
+        monkeypatch.setattr("trpg_agent.check.roll", lambda _: ([14], 14))
+        state = StateMachine(max_hp=20)
+        result = resolve_trigger("beyonder_power", _make_character(), state)
+        assert result["outcome"] == "success"
+        assert "非凡能力" in result["narrative"]

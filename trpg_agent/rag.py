@@ -16,6 +16,32 @@ from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunct
 
 
 # ---------------------------------------------------------------------------
+#  CJK token estimation helpers
+# ---------------------------------------------------------------------------
+
+def _is_cjk(ch: str) -> bool:
+    """Check if a character falls within a CJK Unicode block."""
+    code = ord(ch)
+    return (
+        0x4E00 <= code <= 0x9FFF       # CJK Unified Ideographs
+        or 0x3400 <= code <= 0x4DBF     # CJK Extension A
+        or 0x20000 <= code <= 0x2A6DF   # CJK Extension B
+        or 0xF900 <= code <= 0xFAFF     # CJK Compatibility Ideographs
+    )
+
+
+def _approx_token_len(text: str) -> int:
+    """Estimate token count for mixed CJK / non-CJK text.
+
+    CJK characters count as 1 token each; non-CJK text is split on
+    whitespace and each token counts as 1.
+    """
+    cjk = sum(1 for ch in text if _is_cjk(ch))
+    non_cjk = len([t for t in re.split(r"\s+", text) if t])
+    return max(1, cjk + non_cjk)
+
+
+# ---------------------------------------------------------------------------
 #  Front-matter parser
 # ---------------------------------------------------------------------------
 
@@ -70,6 +96,152 @@ def _parse_front_matter(text: str) -> tuple[dict[str, Any], str]:
 
     content = "\n".join(lines[end_idx + 1 :]).strip()
     return metadata, content
+
+
+# ---------------------------------------------------------------------------
+#  Smart Markdown chunking
+# ---------------------------------------------------------------------------
+
+def _split_heading_paragraphs(text: str) -> List[Dict[str, Any]]:
+    """Split Markdown text by heading hierarchy and blank lines.
+
+    Each returned dict has keys ``content``, ``heading_path``, ``start``,
+    and ``end``.  ``heading_path`` is the breadcrumb of ancestor headings
+    joined with ``" > "`` (e.g. ``"北境荒原 > 古代遗迹"``).
+    """
+    lines = text.splitlines()
+    heading_stack: List[str] = []
+    paragraphs: List[Dict[str, Any]] = []
+    buf: List[str] = []
+    char_pos = 0
+
+    def _flush() -> None:
+        if not buf:
+            return
+        content = "\n".join(buf).strip()
+        if content:
+            paragraphs.append({
+                "content": content,
+                "heading_path": " > ".join(heading_stack) if heading_stack else None,
+                "start": max(0, char_pos - len(content)),
+                "end": char_pos,
+            })
+
+    for raw in lines:
+        stripped = raw.strip()
+
+        if stripped.startswith("#"):
+            _flush()
+            buf = []
+            level = len(raw) - len(raw.lstrip('#'))
+            if level < 1:
+                level = 1
+            title = stripped.lstrip('#').strip()
+            # Pop heading_stack to match level
+            if level <= len(heading_stack):
+                heading_stack = heading_stack[:level - 1]
+            heading_stack.append(title)
+        elif stripped == "":
+            _flush()
+            buf = []
+        else:
+            buf.append(raw)
+
+        char_pos += len(raw) + 1  # +1 for newline
+
+    _flush()
+
+    if not paragraphs:
+        paragraphs = [{"content": text, "heading_path": None, "start": 0, "end": len(text)}]
+
+    return paragraphs
+
+
+def _chunk_with_overlap(
+    paragraphs: List[Dict[str, Any]],
+    chunk_tokens: int = 500,
+    overlap_tokens: int = 100,
+) -> List[Dict[str, Any]]:
+    """Merge paragraphs into token-sized chunks with overlap.
+
+    Each chunk carries the ``heading_path`` of its last paragraph.
+    """
+    chunks: List[Dict[str, Any]] = []
+    cur: List[Dict[str, Any]] = []
+    cur_tokens = 0
+    i = 0
+
+    while i < len(paragraphs):
+        p = paragraphs[i]
+        p_tokens = _approx_token_len(p["content"])
+
+        if cur_tokens + p_tokens <= chunk_tokens or not cur:
+            cur.append(p)
+            cur_tokens += p_tokens
+            i += 1
+        else:
+            # Flush current chunk first
+            content = "\n\n".join(x["content"] for x in cur)
+            start = cur[0]["start"]
+            end = cur[-1]["end"]
+            heading = next(
+                (x["heading_path"] for x in reversed(cur) if x.get("heading_path")),
+                None,
+            )
+            chunks.append({
+                "content": content,
+                "start": start,
+                "end": end,
+                "heading_path": heading,
+            })
+
+            # Large paragraph that exceeds chunk_tokens on its own —
+            # emit it directly as a single chunk to avoid infinite loop.
+            if p_tokens > chunk_tokens:
+                chunks.append({
+                    "content": p["content"],
+                    "start": p["start"],
+                    "end": p["end"],
+                    "heading_path": p.get("heading_path"),
+                })
+                cur = []
+                cur_tokens = 0
+                i += 1
+                continue
+
+            # Build overlap from the tail of current paragraphs
+            if overlap_tokens > 0 and cur:
+                kept: List[Dict[str, Any]] = []
+                kept_tokens = 0
+                for x in reversed(cur):
+                    t = _approx_token_len(x["content"])
+                    if kept_tokens + t > overlap_tokens:
+                        break
+                    kept.append(x)
+                    kept_tokens += t
+                cur = list(reversed(kept))
+                cur_tokens = kept_tokens
+            else:
+                cur = []
+                cur_tokens = 0
+
+    # Final chunk
+    if cur:
+        content = "\n\n".join(x["content"] for x in cur)
+        start = cur[0]["start"]
+        end = cur[-1]["end"]
+        heading = next(
+            (x["heading_path"] for x in reversed(cur) if x.get("heading_path")),
+            None,
+        )
+        chunks.append({
+            "content": content,
+            "start": start,
+            "end": end,
+            "heading_path": heading,
+        })
+
+    return chunks
 
 
 # ---------------------------------------------------------------------------
@@ -144,7 +316,7 @@ class KnowledgeBase:
         query: str,
         character: str,
         n: int = 3,
-        threshold: float = 0.5,
+        threshold: float = 1.2,
     ) -> List[str]:
         """Semantic search with character permission filtering.
 
@@ -163,7 +335,7 @@ class KnowledgeBase:
         n : int, optional
             Maximum number of results to return (default ``3``).
         threshold : float, optional
-            Maximum cosine distance to accept (default ``0.5``).
+            Maximum cosine distance to accept (default ``1.2``).
 
         Returns
         -------
@@ -211,14 +383,14 @@ class KnowledgeBase:
 
         return results
 
-    def load_from_dir(self, dir_path: str) -> None:
+    def load_from_dir(self, dir_path: str, chunk_tokens: int = 500,
+                      overlap_tokens: int = 100) -> None:
         """Load all ``.md`` files from a directory.
 
         Each file may contain a YAML front matter block (``---`` delimited)
         specifying ``known_by`` and ``category``.  The body text after the
-        front matter is split into paragraphs (separated by blank lines);
-        each paragraph becomes a separate knowledge entry sharing the same
-        metadata.
+        front matter is split into token-sized chunks via heading-aware
+        paragraph segmentation with overlap for context continuity.
 
         Entries with identical content are not added twice (deduplication).
 
@@ -226,6 +398,10 @@ class KnowledgeBase:
         ----------
         dir_path : str
             Path to the directory containing ``.md`` knowledge files.
+        chunk_tokens : int, optional
+            Target token count per chunk (default ``500``).
+        overlap_tokens : int, optional
+            Token overlap between consecutive chunks (default ``100``).
         """
         if not os.path.isdir(dir_path):
             return
@@ -250,17 +426,16 @@ class KnowledgeBase:
             known_by = metadata.get("known_by", "所有人")
             category = metadata.get("category", "")
 
-            # Split body into paragraphs (separated by one or more blank lines)
-            paragraphs = [
-                p.strip() for p in re.split(r"\n\s*\n", content) if p.strip()
-            ]
+            # Smart chunking pipeline: heading-aware → token-sized with overlap
+            paragraphs = _split_heading_paragraphs(content)
+            chunks = _chunk_with_overlap(
+                paragraphs,
+                chunk_tokens=chunk_tokens,
+                overlap_tokens=overlap_tokens,
+            )
 
-            if not paragraphs:
-                if content not in seen_contents:
-                    seen_contents.add(content)
-                    self.add_knowledge(content, known_by=known_by, category=category)
-            else:
-                for para in paragraphs:
-                    if para not in seen_contents:
-                        seen_contents.add(para)
-                        self.add_knowledge(para, known_by=known_by, category=category)
+            for ch in chunks:
+                c = ch["content"].strip()
+                if c and c not in seen_contents:
+                    seen_contents.add(c)
+                    self.add_knowledge(c, known_by=known_by, category=category)

@@ -39,16 +39,49 @@ class Character:
         Numeric attributes such as strength, agility, etc.
     skills : list of dict
         Each entry has ``name`` (str) and ``value`` (int) keys.
+    pathway : str
+        LotM beyonder pathway name (e.g. "占卜家", "观众").
+    sequence : int
+        LotM sequence level (9=lowest, 0=god).  Default 9.
+    anchor : str
+        Character's mental anchor description.
+    beyonder_abilities : list of dict
+        Each entry has ``name`` and ``description`` keys.
     """
 
     name: str
     core: List[str]
     attributes: Dict[str, int] = field(default_factory=dict)
     skills: List[Dict[str, Any]] = field(default_factory=list)
+    pathway: str = ""
+    sequence: int = 9
+    anchor: str = ""
+    relations: Dict[str, str] = field(default_factory=dict)
+    beyonder_abilities: List[Dict[str, str]] = field(default_factory=list)
 
     def summary(self) -> str:
         """Return a concise summary of character attributes and skills."""
         lines: List[str] = [f"角色：{self.name}"]
+
+        if self.pathway:
+            lines.append("")
+            lines.append("【非凡途径】")
+            lines.append(f"  途径：{self.pathway}")
+            lines.append(f"  序列：序列{self.sequence}")
+            if self.anchor:
+                lines.append(f"  锚：{self.anchor}")
+
+        if self.relations:
+            lines.append("")
+            lines.append("【人物关系】")
+            for k, v in self.relations.items():
+                lines.append(f"  {k}: {v}")
+
+        if self.beyonder_abilities:
+            lines.append("")
+            lines.append("【非凡能力】")
+            for ab in self.beyonder_abilities:
+                lines.append(f"  {ab.get('name', '')}: {ab.get('description', '')}")
 
         if self.attributes:
             lines.append("")
@@ -131,6 +164,11 @@ def load_character(config_path: str) -> Character:
         core=char_data["core"],
         attributes=char_data["attributes"],
         skills=char_data.get("skills", []),
+        pathway=char_data.get("pathway", ""),
+        sequence=char_data.get("sequence", 9),
+        anchor=char_data.get("anchor", ""),
+        relations=char_data.get("relations", {}),
+        beyonder_abilities=char_data.get("beyonder_abilities", []),
     )
 
 

@@ -232,7 +232,7 @@ class TestPersistence:
         graph_file = os.path.join(persist_dir, "memory_graph.json")
         assert os.path.exists(graph_file)
 
-        with open(graph_file, "r") as f:
+        with open(graph_file, "r", encoding="utf-8") as f:
             data = json.load(f)
         assert "nodes" in data
         assert "edges" in data

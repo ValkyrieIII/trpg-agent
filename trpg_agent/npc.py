@@ -51,6 +51,9 @@ class NPCCharacter(Character):
 
     personality: Dict[str, Any] = field(default_factory=dict)
     few_shot: List[Dict[str, str]] = field(default_factory=list)
+    relations: Dict[str, str] = field(default_factory=dict)
+    pathway: str = ""
+    sequence: int = 0
 
     # ------------------------------------------------------------------
     #  Prompt builders
@@ -122,6 +125,8 @@ class NPCCharacter(Character):
             f"体力：{stamina}",
             f"行为表现：{behaviour}",
         ]
+        if getattr(self, 'pathway', ''):
+            lines.append(f"非凡途径：{self.pathway}（序列{self.sequence}）")
         return "\n".join(lines)
 
     # ------------------------------------------------------------------
@@ -208,6 +213,8 @@ def load_npc(config_path: str) -> NPCCharacter:
         attributes=npc_data["attributes"],
         skills=npc_data.get("skills", []),
         few_shot=npc_data.get("few_shot", []),
+        pathway=npc_data.get("pathway", ""),
+        sequence=npc_data.get("sequence", 0),
     )
 
 
@@ -291,6 +298,9 @@ class NPCStore:
             "attributes": json.dumps(npc.attributes, ensure_ascii=False),
             "skills": json.dumps(npc.skills, ensure_ascii=False),
             "few_shot": json.dumps(npc.few_shot, ensure_ascii=False),
+            "relations": json.dumps(npc.relations, ensure_ascii=False),
+            "pathway": npc.pathway,
+            "sequence": str(npc.sequence),
         }
 
         # NPC name + core as document text for semantic search
@@ -360,6 +370,9 @@ class NPCStore:
                     skills=json.loads(meta.get("skills", "[]")),
                     personality=json.loads(meta.get("personality", "{}")),
                     few_shot=json.loads(meta.get("few_shot", "[]")),
+                    relations=json.loads(meta.get("relations", "{}")),
+                    pathway=meta.get("pathway", ""),
+                    sequence=int(meta.get("sequence", "0")),
                 )
                 self._npcs[name] = npc
                 results.append(npc)
@@ -385,6 +398,9 @@ class NPCStore:
         skills: Optional[List[Dict[str, Any]]] = None,
         personality: Optional[Dict[str, Any]] = None,
         few_shot: Optional[List[Dict[str, str]]] = None,
+        relations: Optional[Dict[str, str]] = None,
+        pathway: str = "",
+        sequence: int = 0,
     ) -> NPCCharacter:
         """Dynamically create and persist a new NPC.
 
@@ -404,6 +420,10 @@ class NPCStore:
             Personality layer (default empty dict).
         few_shot : list of dict, optional
             Few-shot dialogue examples (default empty list).
+        pathway : str, optional
+            LotM beyonder pathway name.
+        sequence : int, optional
+            LotM sequence level (0 = ordinary human).
 
         Returns
         -------
@@ -417,6 +437,9 @@ class NPCStore:
             skills=skills or [],
             personality=personality or {},
             few_shot=few_shot or [],
+            relations=relations or {},
+            pathway=pathway,
+            sequence=sequence,
         )
         self.save(npc)
         # Initialize state machine for this NPC
@@ -518,5 +541,45 @@ class NPCStore:
                 skills=json.loads(meta.get("skills", "[]")),
                 personality=json.loads(meta.get("personality", "{}")),
                 few_shot=json.loads(meta.get("few_shot", "[]")),
+                relations=json.loads(meta.get("relations", "{}")),
+                pathway=meta.get("pathway", ""),
+                sequence=int(meta.get("sequence", "0")),
             )
             self._npcs[name] = npc
+
+            # Restore state from JSON if available
+            self._load_state(name)
+
+    # ------------------------------------------------------------------
+    #  State persistence
+    # ------------------------------------------------------------------
+
+    def _state_path(self, name: str) -> str:
+        """File path for NPC state JSON."""
+        safe_name = name.replace("/", "_").replace("\\", "_")
+        return os.path.join(self._persist_dir, f"{safe_name}_state.json")
+
+    def save_state(self, name: str) -> None:
+        """Persist NPC state machine to JSON."""
+        if name not in self._states:
+            return
+        try:
+            data = self._states[name].to_dict()
+            with open(self._state_path(name), "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    def _load_state(self, name: str) -> None:
+        """Restore NPC state machine from JSON."""
+        path = self._state_path(name)
+        if not os.path.exists(path):
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            npc = self._npcs.get(name)
+            if npc is not None:
+                self._states[name] = StateMachine.from_dict(data)
+        except Exception:
+            pass

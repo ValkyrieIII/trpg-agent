@@ -1,8 +1,9 @@
 """Event resolution logic — non-dialogue event triggers.
 
 When a player triggers a trap, interacts with the environment, prompts an
-NPC reaction, or makes a discovery, the GM uses this module to resolve the
-outcome deterministically via checks + state machine rules — no LLM calls.
+NPC reaction, makes a discovery, faces madness risk, or uses beyonder powers,
+the GM uses this module to resolve the outcome deterministically via checks +
+state machine rules — no LLM calls.
 """
 
 from __future__ import annotations
@@ -30,7 +31,7 @@ def resolve_trigger(
     ----------
     trigger_type : str
         One of ``"trap"``, ``"environment"``, ``"npc_reaction"``,
-        ``"discovery"``.
+        ``"discovery"``, ``"combat"``, ``"madness_risk"``, ``"beyonder_power"``.
     character : Character
         A :class:`~trpg_agent.character.Character` instance (used for
         skill values in discovery).
@@ -44,6 +45,10 @@ def resolve_trigger(
         - ``discovery``: ``skill_name`` (str, default ``"侦查"``),
           ``modifier`` (int, default 0),
           ``narrative_success`` / ``narrative_failure`` (str)
+        - ``madness_risk``: ``difficulty`` (int, default 12),
+          ``madness_delta`` (int, default 5)
+        - ``beyonder_power``: ``power_name`` (str),
+          ``difficulty`` (int, default 14)
 
     Returns
     -------
@@ -52,7 +57,7 @@ def resolve_trigger(
 
         - ``outcome`` (str): one of ``"success"``, ``"failure"``,
           ``"friendly"``, ``"neutral"``, ``"hostile"``,
-          ``"unknown_trigger"``.
+          ``"madness_gain"``, ``"unknown_trigger"``.
         - ``state_changes`` (list of str): trigger names that were applied
           to the state machine (e.g. ``["combat"]``).
         - ``narrative`` (str): human-readable result description.
@@ -78,6 +83,10 @@ def resolve_trigger(
             attacker_attributes=attacker_attrs,
             defender_state=defender_state,
         )
+    elif trigger_type == "madness_risk":
+        return _resolve_madness_risk(state, context)
+    elif trigger_type == "beyonder_power":
+        return _resolve_beyonder_power(state, context)
     else:
         return {
             "outcome": "unknown_trigger",
@@ -275,6 +284,91 @@ def _resolve_combat(
             "damage_taken": counter_damage,
             "def_hp": "",
             "target_status": "alive",
+        }
+
+
+def _resolve_madness_risk(state: Any, context: dict[str, Any]) -> dict[str, Any]:
+    """Madness risk trigger — difficulty check, madness gain on failure.
+
+    Context keys
+    ------------
+    difficulty : int
+        DC for the check (default 12).
+    madness_delta : int
+        Madness increase on failure (default 5).
+    """
+    difficulty = context.get("difficulty", 12)
+    madness_delta = context.get("madness_delta", 5)
+
+    result = difficulty_check(dc=difficulty)
+    roll_val = result["roll"]
+    total = result["total"]
+    if result["success"]:
+        return {
+            "outcome": "success",
+            "state_changes": [],
+            "narrative": f"疯狂判定: d20 = {roll_val} → {total} ≥ DC {difficulty} → 精神稳定",
+            "check_detail": f"d20 = {roll_val} ≥ DC {difficulty}",
+            "damage_dealt": 0,
+            "damage_taken": 0,
+            "madness_increase": 0,
+        }
+    else:
+        return {
+            "outcome": "madness_gain",
+            "state_changes": ["horror"],
+            "narrative": (
+                f"疯狂判定: d20 = {roll_val} → {total} < DC {difficulty} → "
+                f"疯狂值+{madness_delta}，耳畔响起诡异低语..."
+            ),
+            "check_detail": f"d20 = {roll_val} < DC {difficulty}",
+            "damage_dealt": 0,
+            "damage_taken": 0,
+            "madness_increase": madness_delta,
+        }
+
+
+def _resolve_beyonder_power(state: Any, context: dict[str, Any]) -> dict[str, Any]:
+    """Beyonder power usage trigger — always costs madness, harder check.
+
+    Context keys
+    ------------
+    power_name : str
+        Name of the beyonder power being used.
+    difficulty : int
+        DC for the check (default 14).
+    """
+    power_name = context.get("power_name", "非凡能力")
+    difficulty = context.get("difficulty", 14)
+
+    result = difficulty_check(dc=difficulty)
+    roll_val = result["roll"]
+    total = result["total"]
+    if result["success"]:
+        return {
+            "outcome": "success",
+            "state_changes": ["use_beyonder"],
+            "narrative": (
+                f"非凡判定: d20 = {roll_val} → {total} ≥ DC {difficulty} → "
+                f"{power_name}施展成功！灵性涌动，疯狂值+5"
+            ),
+            "check_detail": f"d20 = {roll_val} ≥ DC {difficulty}",
+            "damage_dealt": 0,
+            "damage_taken": 0,
+            "madness_increase": 5,
+        }
+    else:
+        return {
+            "outcome": "failure",
+            "state_changes": ["use_beyonder", "horror"],
+            "narrative": (
+                f"非凡判定: d20 = {roll_val} → {total} < DC {difficulty} → "
+                f"{power_name}失控反噬！疯狂值+15"
+            ),
+            "check_detail": f"d20 = {roll_val} < DC {difficulty}",
+            "damage_dealt": 0,
+            "damage_taken": 0,
+            "madness_increase": 15,
         }
 
 

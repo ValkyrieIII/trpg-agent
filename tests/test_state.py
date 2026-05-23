@@ -1,6 +1,6 @@
-"""Tests for the state module — rule-driven state machine for emotion/trust/stamina."""
+"""Tests for the state module — rule-driven state machine for emotion/trust/stamina/madness."""
 
-from trpg_agent.state import StateMachine
+from trpg_agent.state import MAX_MADNESS, StateMachine, calc_max_hp
 
 
 class TestInitialState:
@@ -254,3 +254,128 @@ class TestCombinedTriggers:
         assert sm.get_state()["emotion"] == "calm"
         assert sm.get_state()["trust"] == 0.6
         assert sm.get_state()["stamina"] == "tired"
+
+
+# ====================================================================
+#  Madness tests
+# ====================================================================
+
+
+class TestMadnessInitial:
+    """Initial madness and representation in state dict."""
+
+    def test_initial_madness_is_0(self):
+        sm = StateMachine(max_hp=20)
+        state = sm.get_state()
+        assert state["madness"] == 0
+        assert state["madness_level"] == "sane"
+
+    def test_custom_initial_madness(self):
+        sm = StateMachine(max_hp=20, madness=5)
+        assert sm.get_state()["madness"] == 5
+
+    def test_madness_in_state_dict(self):
+        sm = StateMachine(max_hp=20, madness=10)
+        state = sm.get_state()
+        assert "madness" in state
+        assert "madness_level" in state
+
+
+class TestMadnessTriggers:
+    """LotM madness trigger effects."""
+
+    def test_use_beyonder_increases_madness_by_5(self):
+        sm = StateMachine(max_hp=20)
+        sm.apply("use_beyonder")
+        assert sm.get_state()["madness"] == 5
+
+    def test_horror_increases_madness_by_10(self):
+        sm = StateMachine(max_hp=20)
+        sm.apply("horror")
+        assert sm.get_state()["madness"] == 10
+
+    def test_acting_success_decreases_madness_by_3(self):
+        sm = StateMachine(max_hp=20, madness=10)
+        sm.apply("acting_success")
+        assert sm.get_state()["madness"] == 7
+
+    def test_anchor_resist_decreases_madness_by_5(self):
+        sm = StateMachine(max_hp=20, madness=10)
+        sm.apply("anchor_resist")
+        assert sm.get_state()["madness"] == 5
+
+
+class TestMadnessBoundaries:
+    """Madness clamping and level thresholds."""
+
+    def test_madness_clamps_at_0(self):
+        sm = StateMachine(max_hp=20, madness=2)
+        sm.apply("acting_success")  # would be -1, clamped to 0
+        assert sm.get_state()["madness"] == 0
+
+    def test_madness_clamps_at_max(self):
+        sm = StateMachine(max_hp=20, madness=95)
+        sm.apply("use_beyonder")  # would be 100
+        sm.apply("use_beyonder")  # would be 105, clamped
+        assert sm.get_state()["madness"] == MAX_MADNESS
+
+    def test_madness_level_sane_below_31(self):
+        sm = StateMachine(max_hp=20, madness=30)
+        assert sm.get_state()["madness_level"] == "sane"
+
+    def test_madness_level_unstable_31_60(self):
+        sm = StateMachine(max_hp=20, madness=45)
+        assert sm.get_state()["madness_level"] == "unstable"
+
+    def test_madness_level_dangerous_61_90(self):
+        sm = StateMachine(max_hp=20, madness=75)
+        assert sm.get_state()["madness_level"] == "dangerous"
+
+    def test_madness_level_lost_above_90(self):
+        sm = StateMachine(max_hp=20, madness=95)
+        assert sm.get_state()["madness_level"] == "失控"
+
+
+class TestAdjustMadness:
+    """Direct madness adjustment method."""
+
+    def test_adjust_madness_direct(self):
+        sm = StateMachine(max_hp=20)
+        new_val = sm.adjust_madness(15)
+        assert new_val == 15
+        assert sm.get_state()["madness"] == 15
+
+    def test_adjust_madness_negative(self):
+        sm = StateMachine(max_hp=20, madness=10)
+        new_val = sm.adjust_madness(-7)
+        assert new_val == 3
+
+    def test_adjust_madness_clamped_low(self):
+        sm = StateMachine(max_hp=20, madness=3)
+        new_val = sm.adjust_madness(-10)
+        assert new_val == 0
+
+    def test_adjust_madness_clamped_high(self):
+        sm = StateMachine(max_hp=20, madness=95)
+        new_val = sm.adjust_madness(20)
+        assert new_val == MAX_MADNESS
+
+
+class TestCalcMaxHpNewFormula:
+    """HP formula: dual-path for old vs new attribute keys."""
+
+    def test_uses_constitution_new_system(self):
+        hp = calc_max_hp({"体质": 14})
+        assert hp == 42
+
+    def test_uses_english_constitution(self):
+        hp = calc_max_hp({"constitution": 10})
+        assert hp == 30
+
+    def test_backward_compatible_willpower(self):
+        hp = calc_max_hp({"strength": 12, "willpower": 14})
+        assert hp == 38
+
+    def test_fallback_default(self):
+        hp = calc_max_hp({})
+        assert hp == 30  # constitution default 10 * 3

@@ -59,10 +59,16 @@ class MemoryStore:
         # -- ChromaDB --
         self._client = chromadb.PersistentClient(path=persist_dir)
         self._embedding_fn = SentenceTransformerEmbeddingFunction(
-            model_name="BAAI/bge-small-zh-v1.5"
+            model_name="BAAI/bge-small-zh-v1.5",
         )
         self._collection = self._client.get_or_create_collection(
             name="memories",
+            embedding_function=self._embedding_fn,
+        )
+
+        # -- NPC-specific collection (separate from main memories) --
+        self._npc_collection = self._client.get_or_create_collection(
+            name="npc_memories",
             embedding_function=self._embedding_fn,
         )
 
@@ -241,6 +247,9 @@ class MemoryStore:
                 continue
             node_data = self._graph.nodes[node]
             importance = min(1.0, node_data.get("importance", 0.5) + 0.1)
+            # Get edge relation — DiGraph returns a dict of attributes directly
+            edge_data = self._graph.get_edge_data(mem_id, node) or {}
+            relation = edge_data.get("relation", "") if isinstance(edge_data, dict) else ""
             results.append(
                 {
                     "id": node,
@@ -249,6 +258,7 @@ class MemoryStore:
                     "type": node_data.get("type", TYPE_EVENT),
                     "timestamp": node_data.get("timestamp", ""),
                     "context": node_data.get("context", {}),
+                    "relation": relation,
                 }
             )
         return results
@@ -278,6 +288,7 @@ class MemoryStore:
         seen: set = set()
         merged: List[Dict[str, Any]] = []
 
+        # Interleave: semantic result → its graph chain → next semantic → its chain
         for entry in semantic:
             if entry["id"] not in seen:
                 seen.add(entry["id"])
@@ -289,7 +300,101 @@ class MemoryStore:
                     seen.add(rel["id"])
                     merged.append(rel)
 
-        merged.sort(key=lambda x: x["importance"], reverse=True)
+        return merged
+
+    # ------------------------------------------------------------------
+    #  NPC-specific memory (separate collection)
+    # ------------------------------------------------------------------
+
+    def npc_add(
+        self,
+        content: str,
+        context: dict,
+        npc_name: str,
+        importance: float = 0.5,
+    ) -> str:
+        """Add an NPC interaction memory to the NPC collection."""
+        mem_id = uuid4().hex[:8]
+        timestamp = datetime.now(timezone.utc).isoformat()
+
+        chroma_meta = {
+            "type": "npc_dialogue",
+            "timestamp": timestamp,
+            "importance": importance,
+            "npc_name": npc_name,
+            "context": json.dumps(context, ensure_ascii=False),
+        }
+
+        self._npc_collection.add(
+            ids=[mem_id],
+            documents=[content],
+            metadatas=[chroma_meta],
+        )
+
+        # Also add to graph for relationship traversal
+        self._graph.add_node(
+            mem_id,
+            content=content,
+            type="npc_dialogue",
+            timestamp=timestamp,
+            importance=importance,
+            npc_name=npc_name,
+            context=context,
+        )
+        self._save_graph()
+        return mem_id
+
+    def npc_search(self, npc_name: str, query: str, n: int = 3) -> List[Dict[str, Any]]:
+        """Semantically search NPC memories, filtered by NPC name."""
+        raw = self._npc_collection.query(
+            query_texts=[f"{npc_name} {query}"],
+            n_results=n,
+            where={"npc_name": npc_name},
+        )
+
+        output: List[Dict[str, Any]] = []
+        ids_list = raw.get("ids", [[]])
+        if not ids_list or not ids_list[0]:
+            return output
+
+        for i in range(len(ids_list[0])):
+            meta = raw["metadatas"][0][i]
+            output.append({
+                "id": ids_list[0][i],
+                "content": raw["documents"][0][i],
+                "importance": meta.get("importance", 0.5),
+                "type": "npc_dialogue",
+                "timestamp": meta.get("timestamp", ""),
+                "npc_name": meta.get("npc_name", ""),
+                "context": json.loads(meta.get("context", "{}")),
+            })
+        return output
+
+    def npc_full_retrieve(self, npc_name: str, query: str, n: int = 3) -> List[Dict[str, Any]]:
+        """Combined semantic + graph retrieval for NPC memories.
+
+        Only returns memories belonging to this NPC — graph traversal
+        is restricted to ``npc_dialogue`` nodes with matching npc_name.
+        """
+        semantic = self.npc_search(npc_name, query, n=n)
+
+        seen: set = set()
+        merged: List[Dict[str, Any]] = []
+
+        for entry in semantic:
+            if entry["id"] not in seen:
+                seen.add(entry["id"])
+                merged.append(entry)
+
+            related = self.get_related(entry["id"])
+            for rel in related:
+                if rel["id"] in seen:
+                    continue
+                rel_npc = self._graph.nodes[rel["id"]].get("npc_name", "")
+                if rel_npc == npc_name:
+                    seen.add(rel["id"])
+                    merged.append(rel)
+
         return merged
 
     # ------------------------------------------------------------------

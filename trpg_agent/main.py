@@ -60,7 +60,12 @@ def main() -> None:
 
     # ---- Initialize GameMaster ----
     try:
-        gm = GameMaster(config_path, debug=args.debug)
+        with console.status("[bold cyan]正在启动 TRPG Agent...[/bold cyan]", spinner="dots") as status:
+            gm = GameMaster(
+                config_path,
+                debug=args.debug,
+                status_fn=lambda msg: status.update(f"[bold cyan]{msg}[/bold cyan]"),
+            )
     except Exception as e:
         console.print(
             Panel(
@@ -74,8 +79,14 @@ def main() -> None:
     player_name = gm.player.name
     world_name = gm.world.get("name", "未知世界")
 
-    # ---- Generate opening scene ----
-    opening = gm.generate_opening()
+    # ---- Load save or generate opening ----
+    save_path = "data/save.json"
+    if gm.load_save(save_path):
+        opening = gm.generate_continuation()
+        opening_title = "[bold]续接[/bold]"
+    else:
+        opening = gm.generate_opening()
+        opening_title = "[bold]开场[/bold]"
 
     # ---- Welcome panel ----
     console.print(
@@ -98,7 +109,7 @@ def main() -> None:
         console.print(
             Panel(
                 opening,
-                title="[bold]开场[/bold]",
+                title=opening_title,
                 border_style="yellow",
             )
         )
@@ -109,7 +120,8 @@ def main() -> None:
             user_input = Prompt.ask("> ")
         except (KeyboardInterrupt, EOFError):
             console.print()
-            console.print("[dim]冒险结束。再见。[/dim]")
+            gm.save("data/save.json")
+            console.print("[dim]进度已保存。冒险结束。再见。[/dim]")
             break
 
         user_input = user_input.strip()
@@ -118,7 +130,8 @@ def main() -> None:
 
         # ---- Exit commands ----
         if user_input.lower() in ("exit", "quit", "退出"):
-            console.print("[dim]冒险结束。再见。[/dim]")
+            gm.save("data/save.json")
+            console.print("[dim]进度已保存。冒险结束。再见。[/dim]")
             break
 
         # ---- Slash commands ----
@@ -146,6 +159,18 @@ def main() -> None:
                 reply = f"未知命令：{user_input}"
         else:
             reply = gm.process(user_input)
+
+        # ---- Check game over ----
+        if gm._game_over:
+            console.print(
+                Panel(
+                    reply,
+                    title="[bold red]冒险终结[/bold red]",
+                    border_style="red",
+                )
+            )
+            console.print("[dim]角色已死亡。冒险结束。[/dim]")
+            break
 
         # ---- Display response ----
         console.print(
