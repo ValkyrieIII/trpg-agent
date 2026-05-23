@@ -6,21 +6,24 @@
 - 骰子投掷（dice 意图）
 - 角色信息查询（info 意图）
 - 事件判定（event 意图）
-- 完整对话管线（dialogue 意图）：检索 -> 组装 prompt -> LLM 生成 -> 状态更新
-  -> 记忆记录 -> 历史管理
+- 完整对话管线（dialogue 意图）：GM Agent 分析输入 -> 执行检定 -> NPC Agent 扮演
+  -> 状态更新 -> 记忆记录 -> 历史管理
 
 典型用法::
 
-    gm = GameMaster("configs/character.yaml")
-    reply = gm.process("掷骰 d20")
+    gm = GameMaster("config.yaml")
+    reply = gm.process("我推开酒馆的门")
     print(reply)
 """
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from typing import Any, Dict, List, Optional
+
+import yaml
 
 from trpg_agent.character import Character
 from trpg_agent.check import difficulty_check, skill_check
@@ -28,6 +31,7 @@ from trpg_agent.dice import roll
 from trpg_agent.event import resolve_trigger
 from trpg_agent.llm import LLM
 from trpg_agent.memory import MemoryStore
+from trpg_agent.npc import NPCStore
 from trpg_agent.rag import KnowledgeBase
 from trpg_agent.state import StateMachine
 
@@ -116,8 +120,20 @@ class GameMaster:
         llm_api_key: Optional[str] = None,
         knowledge_dir: str = "data/knowledge",
     ) -> None:
-        # -- Character --
-        self.character = Character.load(config_path)
+        # -- Player --
+        self.player = Character.load(config_path)
+
+        # -- World (from config) --
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                config_data = yaml.safe_load(f)
+            self.world: Dict[str, Any] = config_data.get("world", {})
+        except Exception:
+            self.world = {}
+
+        # -- NPC Store --
+        self.npc_store = NPCStore()
+        self.scene_npcs: List[str] = []
 
         # -- Subsystems --
         self.state = StateMachine()
@@ -143,9 +159,9 @@ class GameMaster:
         except (RuntimeError, Exception):
             pass
 
-        # -- Conversation history --
+        # -- Player conversation history --
         self.max_history: int = 10
-        self.history: List[Dict[str, str]] = []
+        self.player_history: List[Dict[str, str]] = []
 
     # ------------------------------------------------------------------
     #  Intent detection
@@ -209,7 +225,7 @@ class GameMaster:
         """
         state = self.state.get_state()
         return (
-            f"{self.character.summary()}\n\n"
+            f"{self.player.summary()}\n\n"
             f"【当前状态】\n"
             f"情绪：{state['emotion']}\n"
             f"信任度：{state['trust']}\n"
@@ -231,7 +247,7 @@ class GameMaster:
 
         result = resolve_trigger(
             trigger_type=trigger_type,
-            character=self.character,
+            character=self.player,
             state=self.state,
         )
 
@@ -274,7 +290,7 @@ class GameMaster:
             skill_name = skill_or_dc
             # skills 是 list[dict]，查找匹配技能名
             skill_value = 50
-            for s in self.character.skills:
+            for s in self.player.skills:
                 if s["name"] == skill_name:
                     skill_value = s["value"]
                     break
@@ -306,131 +322,250 @@ class GameMaster:
             }
 
     # ------------------------------------------------------------------
-    #  GM & Character agents (split)
+    #  GM agent system prompt
     # ------------------------------------------------------------------
 
     _GM_SYSTEM = (
-        "你是TRPG的地下城主(Game Master)。你的任务是叙述场景，不是扮演角色。\n"
-        "严格遵守:\n"
-        "- 用第三人称客观叙述(如: '他推开门，冷风灌了进来。')。\n"
-        "- 禁止使用括号进行动作描写(如: '(推开门)'、'(看向玩家)')。\n"
-        "- 禁止以NPC的口吻说话或复述NPC的对话。\n"
-        "- 禁止说'你觉得'、'你感到'——只描述客观事实。\n"
-        "- 每次不超过100字。\n"
-        "- 纯社交场景一句话带过环境即可(如: '酒馆里人声嘈杂。')。"
+        "你是 TRPG 地下城主(Game Master)。\n"
+        "玩家扮演 {player_name}，{player_desc}\n\n"
+        "## 职责\n"
+        "1. 叙述场景 — 用第三人称客观描述玩家看到、听到、感受到的一切。\n"
+        "2. 判断检定 — 玩家用括号声明行动时（如'(我拔出短刀)'），判断是否需要检定并执行。纯扮演动作（微笑、点头）无需检定。\n"
+        "3. 扮演 NPC — 当玩家对 NPC 说话或互动时，你需要以该 NPC 的身份说话。\n\n"
+        "## 规则\n"
+        "- 不要替玩家角色说话或替 ta 做决定。\n"
+        "- 不要描述玩家角色的内心感受（'你觉得...'），只描述客观事实。\n"
+        "- 每段叙述不超过 150 字。\n"
+        "- 当玩家询问不在场的 NPC 时，直接说明 ta 不在。\n"
+        "- 你可以在叙事中引入新 NPC，引入后该 NPC 将持续存在于世界中。\n\n"
+        "## 当前场景已知 NPC\n"
+        "{scene_npcs}\n\n"
+        "## 玩家角色卡\n"
+        "{player_card}"
     )
 
-    def _call_gm(
-        self,
-        user_input: str,
-        check_result: dict | None,
-        knowledge: list[str],
-        memories: list[dict],
-    ) -> str:
-        """GM Agent: 叙述场景和检定结果。"""
-        # 纯对话（无检定、无特殊知识触发）→ 极简环境描写
-        if not check_result:
-            # 只有知识或记忆触发时才给轻量旁白
-            if not knowledge and not memories:
-                return ""
+    # ------------------------------------------------------------------
+    #  GM Agent (v2 — JSON response)
+    # ------------------------------------------------------------------
 
-        gm_parts = [self._GM_SYSTEM]
-        state = self.state.get_state()
-        gm_parts.append(
-            f"当前NPC: {self.character.name} (仅作背景参考，你不需要模仿ta)"
+    def _call_gm(self, user_input: str, knowledge: list[str], memories: list[dict]) -> dict:
+        """GM Agent: 分析玩家输入，返回结构化 JSON。
+
+        Returns
+        -------
+        dict
+            Keys: ``narration``, ``check``, ``responding_npc``, ``new_npc``.
+        """
+        player_desc = " ".join(self.player.core)
+
+        scene_npcs_text = "暂无已知 NPC"
+        if self.scene_npcs:
+            scene_npcs_text = "\n".join(f"- {n}" for n in self.scene_npcs)
+
+        player_card = self.player.summary()
+
+        # -- Build system prompt --
+        system_parts = [
+            self._GM_SYSTEM.format(
+                player_name=self.player.name,
+                player_desc=player_desc,
+                scene_npcs=scene_npcs_text,
+                player_card=player_card,
+            ),
+        ]
+
+        # Inject knowledge
+        if knowledge:
+            system_parts.append("\n## 相关知识\n" + "\n".join(knowledge[:3]))
+
+        # Inject memories
+        if memories:
+            system_parts.append(
+                "\n## 最近事件\n"
+                + "\n".join(m["content"] for m in memories[:3])
+            )
+
+        # Inject check rules
+        system_parts.append(
+            "\n\n## 检定规则\n"
+            "玩家用括号声明行动时（如'(我拔出短刀)'）判断是否需要检定。\n"
+            "纯扮演动作（微笑、点头、摇头、叹气等）无需检定。\n"
+            "如果你认为需要检定，请在 check 字段返回包含检定信息的对象。\n"
+            "如果你认为不需要，check 字段为 null。"
         )
 
-        if check_result:
-            gm_parts.append(f"\n检定结果:\n{check_result['narrative']}")
-            gm_parts.append("请叙述这个行动的过程和结果。")
-        else:
-            gm_parts.append("\n请用一句话描述当前环境氛围。")
+        system_prompt = "\n".join(system_parts)
 
-        if knowledge:
-            gm_parts.append(f"相关知识:\n" + "\n".join(knowledge[:2]))
-        if memories:
-            gm_parts.append(f"最近事件:\n" + "\n".join(m["content"] for m in memories[:2]))
-
-        gm_system = "\n".join(gm_parts)
-        gm_messages = [{"role": "user", "content": f"玩家: {user_input}"}]
+        gm_messages = [
+            {
+                "role": "user",
+                "content": (
+                    f"玩家说：{user_input}\n\n"
+                    "请以 JSON 格式回复，包含以下字段：\n"
+                    '{"narration": "场景叙述", "check": null, '
+                    '"responding_npc": null, "new_npc": null}'
+                ),
+            },
+        ]
 
         if self._llm_available and self.llm:
             try:
-                return self.llm.chat(system=gm_system, messages=gm_messages)
+                raw = self.llm.chat(system=system_prompt, messages=gm_messages)
+                return self._parse_gm_response(raw)
             except Exception:
-                return ""
-        return ""
+                pass
+
+        return {"narration": "", "check": None, "responding_npc": None, "new_npc": None}
+
+    def _parse_gm_response(self, raw: str) -> dict:
+        """解析 GM 的 JSON 响应，失败时将全部文本视为 narration。"""
+        text = raw.strip()
+
+        # Strip markdown code fences
+        if text.startswith("```"):
+            lines = text.split("\n")
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            text = "\n".join(lines).strip()
+
+        # Attempt JSON parse
+        try:
+            result = json.loads(text)
+            if isinstance(result, dict):
+                return {
+                    "narration": result.get("narration", ""),
+                    "check": result.get("check"),
+                    "responding_npc": result.get("responding_npc"),
+                    "new_npc": result.get("new_npc"),
+                }
+        except json.JSONDecodeError:
+            pass
+
+        # Fallback: entire response is narration
+        return {"narration": raw, "check": None, "responding_npc": None, "new_npc": None}
+
+    # ------------------------------------------------------------------
+    #  Dialogue handler (v2 — GM + NPC Agent pipeline)
+    # ------------------------------------------------------------------
 
     def _handle_dialogue(self, user_input: str) -> str:
-        """处理对话意图 — 双 Agent 管线。
+        """处理对话意图 — GM Agent + NPC Agent 管线。
 
-        GM Agent: 场景叙述 + 检定结果
-        角色 Agent: 以角色身份说话
+        流程
+        ----
+        1. 硬编码行动匹配 (_match_action)
+        2. 检索（记忆 + 知识）
+        3. GM Agent (_call_gm) → {narration, check, responding_npc, new_npc}
+        4. 需要时执行检定
+        5. 新 NPC 创建
+        6. NPC Agent 扮演
+        7. 组装输出
+        8. 状态更新
+        9. 记忆记录
+        10. 更新 player_history
         """
-        name = self.character.name
-
         # ---- Step 0: 硬编码匹配行动 ----
         action = self._match_action(user_input)
 
-        # ---- Step 1: 执行检定 ----
+        # ---- Step 1: 检索 ----
+        memories = self.memory.full_retrieve(user_input)
+        knowledge = self.knowledge.query(user_input, self.player.name)
+
+        # ---- Step 2: GM Agent ----
+        gm_result = self._call_gm(user_input, knowledge, memories)
+
+        narration = gm_result.get("narration", "")
+        check_info = gm_result.get("check")
+        responding_npc = gm_result.get("responding_npc")
+        new_npc_name = gm_result.get("new_npc")
+
+        # ---- Step 3: 执行检定（GM 判断需要时） ----
         check_result = None
-        if action:
+        if check_info is not None and action is not None:
             check_result = self._execute_check(action)
 
-        # ---- Step 2: 检索 ----
-        memories = self.memory.full_retrieve(user_input)
-        knowledge = self.knowledge.query(user_input, name)
+        # ---- Step 4: 处理新 NPC 创建 ----
+        if new_npc_name and isinstance(new_npc_name, str):
+            existing = self.npc_store.find_by_name(new_npc_name)
+            if existing is None:
+                self.npc_store.create(
+                    name=new_npc_name,
+                    core=[f"{new_npc_name} — 由 GM 引入的角色"],
+                    attributes={
+                        "strength": 10,
+                        "agility": 10,
+                        "intelligence": 10,
+                        "willpower": 10,
+                    },
+                )
+            if new_npc_name not in self.scene_npcs:
+                self.scene_npcs.append(new_npc_name)
 
-        # ---- Step 3: GM Agent 叙述 ----
-        gm_narration = self._call_gm(user_input, check_result, knowledge, memories)
+        # ---- Step 5: NPC Agent 扮演 ----
+        npc_reply = None
+        if responding_npc and isinstance(responding_npc, str):
+            npc = self.npc_store.find_by_name(responding_npc)
+            if npc is None:
+                results = self.npc_store.search(responding_npc)
+                if results:
+                    npc = results[0]
 
-        # ---- Step 4: 角色 Agent ----
-        char_parts: List[str] = [
-            self.character.build_personality_prompt(),
-            self.character.build_state_prompt(self.state.get_state()),
-        ]
+            if npc is not None:
+                npc_system = (
+                    npc.build_personality_prompt()
+                    + "\n\n"
+                    + npc.build_state_prompt({
+                        "emotion": "calm",
+                        "trust": 0.5,
+                        "stamina": "fresh",
+                    })
+                )
+                npc_messages = list(self.npc_store.get_history(responding_npc))
+                npc_messages.append({
+                    "role": "user",
+                    "content": f"{self.player.name}对{responding_npc}说：{user_input}",
+                })
 
-        if knowledge:
-            char_parts.append("【相关知识】")
-            char_parts.extend(knowledge)
-        if memories:
-            char_parts.append("【相关记忆】")
-            for mem in memories[:3]:
-                char_parts.append(f"- {mem['content']}")
+                if self._llm_available and self.llm:
+                    try:
+                        npc_reply = self.llm.chat(
+                            system=npc_system,
+                            messages=npc_messages,
+                        )
+                    except Exception:
+                        npc_reply = "(NPC 模块暂时不可用)"
+                else:
+                    npc_reply = "(LLM 模块尚未实现)"
 
-        char_prompt = "\n\n".join(char_parts)
-        char_messages: List[Dict[str, str]] = list(self.history)
+                self.npc_store.append_history(
+                    responding_npc, "user", f"{self.player.name}: {user_input}",
+                )
+                self.npc_store.append_history(
+                    responding_npc, "assistant", npc_reply,
+                )
 
-        if gm_narration:
-            char_prompt += (
-                f"\n\n## 场景叙述\n"
-                f"{gm_narration}\n\n"
-                f"以上是GM描述的场景。请以{name}的身份自然回应玩家。"
-                f"不要在你的回复中加前缀或标签，直接说话。"
-            )
+        # ---- Step 6: 组装输出 ----
+        parts: List[str] = []
+        if narration:
+            parts.append(f"[GM]: {narration}")
+        if check_result:
+            parts.append(check_result["narrative"])
+        if npc_reply:
+            npc_label = responding_npc or "NPC"
+            parts.append(f"[{npc_label}]: {npc_reply}")
 
-        char_messages.append({"role": "user", "content": user_input})
+        response = "\n\n".join(parts) if parts else narration
 
-        if self._llm_available and self.llm is not None:
-            try:
-                char_reply = self.llm.chat(system=char_prompt, messages=char_messages)
-            except Exception:
-                char_reply = "LLM 模块尚未实现"
-        else:
-            char_reply = "LLM 模块尚未实现"
+        # ---- Step 7: 状态更新 ----
+        combined_parts = [user_input]
+        if narration:
+            combined_parts.append(narration)
+        if npc_reply:
+            combined_parts.append(npc_reply)
+        combined = " ".join(combined_parts)
 
-        # ---- 组装输出 ----
-        # 清理 LLM 可能输出的前缀
-        clean_reply = re.sub(r'^\s*\[' + re.escape(name) + r'\]\s*[:：]?\s*', '', char_reply)
-        clean_reply = re.sub(r'^\s*\[GM\]\s*[:：]?\s*', '', clean_reply)
-
-        if gm_narration:
-            response = f"[GM]: {gm_narration}\n\n[{name}]: {clean_reply}"
-        else:
-            response = f"[{name}]: {clean_reply}"
-
-        # ---- Step 5: 状态更新 ----
-        combined = f"{user_input} {gm_narration} {char_reply}"
         for trigger, keywords in _KEYWORD_TRIGGERS.items():
             for kw in keywords:
                 if kw in combined:
@@ -439,12 +574,16 @@ class GameMaster:
         if check_result and check_result.get("stamina_cost"):
             self.state.apply("combat")
 
-        # ---- Step 6: 记录记忆 ----
-        if self._llm_available and self.llm is not None:
+        # ---- Step 8: 记录记忆 ----
+        if self._llm_available and self.llm:
             try:
-                extracted = self.llm.extract_memory(
-                    f"用户：{user_input}\n{name}：{char_reply}"
-                )
+                dialogue_for_memory = f"用户：{user_input}"
+                if narration:
+                    dialogue_for_memory += f"\nGM：{narration}"
+                if npc_reply:
+                    npc_label = responding_npc or "NPC"
+                    dialogue_for_memory += f"\n{npc_label}：{npc_reply}"
+                extracted = self.llm.extract_memory(dialogue_for_memory)
             except Exception:
                 extracted = ""
         else:
@@ -456,12 +595,12 @@ class GameMaster:
                 context={"emotion": self.state.get_state()["emotion"]},
             )
 
-        # ---- Step 7: 更新对话历史 ----
-        self.history.append({"role": "user", "content": user_input})
-        self.history.append({"role": "assistant", "content": response})
+        # ---- Step 9: 更新 player_history ----
+        self.player_history.append({"role": "user", "content": user_input})
+        self.player_history.append({"role": "assistant", "content": response})
 
-        if len(self.history) > self.max_history * 2:
-            self.history = self.history[-self.max_history * 2 :]
+        if len(self.player_history) > self.max_history * 2:
+            self.player_history = self.player_history[-self.max_history * 2 :]
 
         return response
 
