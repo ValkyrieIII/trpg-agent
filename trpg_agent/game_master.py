@@ -42,7 +42,7 @@ from trpg_agent.state import StateMachine
 
 _PATTERN_DICE = re.compile(r"掷骰|骰子|d\d+", re.IGNORECASE)
 _PATTERN_INFO = re.compile(r"查看|属性|状态|角色卡")
-_PATTERN_EVENT = re.compile(r"战斗|攻击|触发|陷阱|环境")
+_PATTERN_EVENT = re.compile(r"战斗|攻击|射击|触发|陷阱|环境")
 
 # Dice expression embedded in user text (e.g. "3d6+2", "d20")
 _DICE_EXPR_RE = re.compile(r"(\d*)d(\d+)(?:\s*\+\s*(\d+))?")
@@ -63,7 +63,7 @@ _KEYWORD_TRIGGERS: Dict[str, List[str]] = {
 # ---------------------------------------------------------------------------
 
 _EVENT_DESCRIPTIONS: Dict[str, str] = {
-    "combat":        "战斗 攻击 砍杀 挥拳 刺杀 开打 揍 干掉 出手 拔刀 射箭 冲锋",
+    "combat":        "战斗 攻击 射击 砍杀 挥拳 刺杀 开打 揍 干掉 出手 拔刀 射箭 冲锋",
     "trap":          "陷阱 机关 暗器 触发陷阱 踩到 触发机关 中招",
     "environment":   "环境 天气 地形 攀爬 涉水 寒冷 酷热 暴风雪 迷雾",
     "discovery":     "发现 线索 搜索 观察 调查 仔细看 找线索 检查 侦查",
@@ -89,7 +89,7 @@ _ACTION_RULES: list[tuple[str, str, object, int]] = [
     (r"(搜索|搜查|调查|观察|仔细看|找线索|找找).+", "skill", "侦查", 0),
     (r"(跳跃|跳[过去]|跃过).+", "check", 12, 0),
     (r"(搬运|推[开门]|举[起重]|砸).+", "check", 13, 0),
-    (r"(射击|射箭|瞄准|拉弓).+", "skill", "弓箭", 0),
+    (r"(射箭|瞄准|拉弓).+", "skill", "弓箭", 0),
     (r"(闪避|躲避|回避|躲开).+", "check", 14, 0),
     (r"(游泳|涉水|过河|渡河).+", "check", 12, 0),
     (r"(忍耐|抵抗|坚持|硬撑).+", "check", 13, 0),
@@ -506,7 +506,10 @@ class GameMaster:
                     f"玩家说：{user_input}\n\n"
                     "请以 JSON 格式回复，包含以下字段：\n"
                     '{"narration": "场景叙述", "check": null, '
-                    '"responding_npc": null, "new_npc": null}'
+                    '"responding_npc": "NPC短名（2-6字）或null", '
+                    '"new_npc": "新NPC短名（2-6字）或null"}\n\n'
+                    "注意：responding_npc 和 new_npc 必须用简短的人名（如'老马'、'老板娘'），"
+                    "不要用长描述。"
                 ),
             },
         ]
