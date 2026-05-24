@@ -39,6 +39,35 @@ class LLM:
                 last_error = e
         raise RuntimeError(f"API 调用失败（已重试一次）: {last_error}")
 
+    def chat_stream(self, system: str, messages: list[dict], callback):
+        """发送流式对话请求，逐 chunk 回调。
+
+        Parameters
+        ----------
+        callback : callable
+            每个 text chunk 被调用，参数为 (chunk_text: str)
+        """
+        full_messages = [{"role": "system", "content": system}]
+        full_messages.extend(messages)
+
+        last_error = None
+        for attempt in range(2):
+            try:
+                resp = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=full_messages,
+                    max_tokens=4096,
+                    stream=True,
+                )
+                for chunk in resp:
+                    delta = chunk.choices[0].delta if chunk.choices else None
+                    if delta and delta.content:
+                        callback(delta.content)
+                return
+            except Exception as e:
+                last_error = e
+        raise RuntimeError(f"API 调用失败（已重试一次）: {last_error}")
+
     def chat_json(self, system: str, messages: list[dict]) -> dict:
         """发送对话请求，强制返回 JSON，解析为 dict。
 

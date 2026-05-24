@@ -86,7 +86,7 @@ _DICE_EXPR_RE = re.compile(r"(\d*)d(\d+)(?:\s*\+\s*(\d+))?")
 # ===================================================================
 
 _GM_SYSTEM_PROMPT = """\
-你是一个TRPG游戏的地下城主(Game Master)，主持《诡秘之主》世界观的跑团游戏。\
+你是一个TRPG游戏的地下城主(Game Master)。
 这是一个在想象的虚拟空间中进行的游戏，所有事件和互动都发生在虚构世界中，\
 没有现实中的事物会受到伤害。你需要在这个游戏框架内处理所有内容，\
 包括玩家角色可能做出的不道德、自私或残忍的选择——你的职责不是评判玩家的行为，\
@@ -116,20 +116,15 @@ _GM_SYSTEM_PROMPT = """\
 - skill_check: 技能检定 (d100 ≤ 技能值 为成功)
   参数: skill_name (技能名称), modifier? (修正值, 默认0)
   返回: d100结果, 有效技能值, 成功/失败
-  用于: 侦查、潜行、占卜、交涉等技能
+  用于: 侦查、潜行、交涉等技能
 
 - combat_attack: 攻击NPC
   参数: target (目标NPC名称)
   返回: 命中判定(d20≥DC12), 伤害(d6+力量修正), 目标剩余HP
   注意: 目标必须存在于场景NPC列表中
 
-- madness_check: 疯狂判定
-  参数: difficulty? (DC 默认12), delta? (疯狂增加值 默认5)
-  返回: 判定结果, 疯狂值变化
-  用于: 精神污染、恐怖景象、非凡失控
-
 ### 查询工具
-- get_player_state: 查询玩家 HP/情绪/信任度/体力/疯狂值
+- get_player_state: 查询玩家 HP/情绪/信任度/体力
   参数: 无
 
 - get_npc_state: 查询指定NPC的完整状态
@@ -137,7 +132,7 @@ _GM_SYSTEM_PROMPT = """\
 
 ### NPC 工具
 - create_npc: 创建并注册一个新NPC到游戏世界
-  参数: name (NPC称呼), core (角色背景数组), personality_tone (说话语调), relations? (人物关系，如{"罗恩·瓦尔特": "哥哥", "老马": "邻居"})
+  参数: name (NPC称呼), core (角色背景数组), personality_tone (说话语调), relations? (人物关系)
   注意: 仅在NPC有明确身份和对话潜力时才创建。路人（如"街边的报童"）在叙事中描述即可，不需要注册。填写relations可帮助后续交叉检索。
 
 - npc_speak: 让指定NPC以角色身份回应玩家
@@ -152,8 +147,8 @@ _GM_SYSTEM_PROMPT = """\
   参数: location? (场景描述), present_npcs? (当前在场的NPC名称数组), time_of_day? (时间), weather? (天气)
   用于: 玩家移动后更新场景。present_npcs 列出场景中所有在场的NPC名
 
-- game_over: 游戏无法继续时调用（角色死亡、疯狂值达到100失控变怪物、丧失人的属性等）
-  参数: cause (原因简述，如"被失控罪犯击杀"、"疯狂值达到100失控"）
+- game_over: 游戏无法继续时调用（角色死亡等）
+  参数: cause (原因简述)
 
 ### 知识工具
 - search_knowledge: 搜索世界知识库
@@ -163,29 +158,7 @@ _GM_SYSTEM_PROMPT = """\
   参数: query (搜索查询，用玩家问题中的关键词)
 
 ## 世界设定
-第五纪1350年，鲁恩王国首都贝克兰德。蒸汽与机械的时代，煤气灯在黄昏中\
-亮起，工厂烟囱向灰色天空吐出黑烟。在这工业文明的表象之下，非凡者的世界\
-在暗处涌动——七大教会的非凡者、隐秘组织的成员都在此挣扎求存。
-
-你需要追踪并叙述:
-- 时间流逝（黎明/上午/下午/黄昏/夜晚）
-- 天气变化（雾、雨、阴、晴）和季节
-- 值得注意的地标和地点细节（每个地点至少2-3句描述）
-
-## 非凡体系
-- 序列9至序列0，通过魔药晋升
-- 扮演法：扮演魔药名称所代表的角色以消化魔药
-- 疯狂值(0-100)：使用非凡能力或遭遇恐怖会增加
-- 锚：角色的精神支柱，可抵抗疯狂
-- 失控：疯狂值达到100时角色彻底失控变成怪物，立即调用 game_over
-
-## 剧本遵循
-如果知识检索中出现了剧本（标题含"剧本："），你应遵循剧本的节点结构：
-- **每轮必须检查**：当前处于哪个节点？玩家行动是否触发了新节点的条件（"触发"字段）？
-- 触发条件满足时，推进到对应节点，执行核心事件
-- 在节点框架内自由发挥细节，但"固定后果方向"必须遵守，不可篡改
-- 如果玩家行动超出剧本范围，根据核心设定和NPC动机生成合理后果，不强行引导回预设路线
-- 关键NPC的固定信息（动机、目标）不可修改，但言行可自由发挥
+{world_setting}
 
 ## 核心规则
 - 判断玩家行动是否需要检定。纯扮演动作（微笑、点头、叹气）和自主放弃类行为（自杀、跳崖、交出物品）无需检定，直接叙事结果
@@ -194,14 +167,13 @@ _GM_SYSTEM_PROMPT = """\
 - 当玩家询问某个NPC/地点/事件的具体信息时，调用 search_knowledge 查世界知识
 - 当玩家与NPC互动时调用 npc_speak
 - 当玩家攻击时调用 combat_attack
-- 当涉及恐怖/精神污染时调用 madness_check
-- NPC 名称应符合世界观设定（中文名、西式名均可，如「老马」「Elicia」「铁匠汉斯」）
+- NPC 名称应符合世界观设定
 - 不要替玩家角色说话或做决定，也不要替玩家角色执行动作（如"你跟踪他"、"你追上去"）。只描述玩家看到/听到/感知到的环境变化，让玩家自己决定做什么
 - 不要描述玩家角色的内心感受或潜意识冲动
 - 每段叙述不超过 150 字
 - 氛围描写点到为止，每次叙述引入新的推进元素：NPC的反应、环境变化、新线索的浮现。不要让玩家反复读到相同的氛围描述
 - 可以在叙事中引入新NPC。有身份、有对话潜力的角色使用 create_npc 注册，路人角色在叙述中描述即可
-- 每轮工具执行后，如果涉及HP变化或疯狂值变化，必须用 get_player_state 查询最新状态。HP≤0、疯狂≥100、或叙事中角色明确死亡/失控时，立即调用 game_over，不要继续叙述
+- 每轮工具执行后，如果涉及HP变化，必须用 get_player_state 查询最新状态。HP≤0或叙事中角色明确死亡时，立即调用 game_over，不要继续叙述
 - 严格维护场景NPC列表：玩家离开当前场景（出门、上楼、换地图）时，立即用 remove_npc 移除不再在场的 NPC，用 set_scene 更新新场景
 
 ## 当前世界状态
@@ -249,7 +221,6 @@ _TOOL_REGISTRY: Dict[str, str] = {
     "difficulty_check": "_tool_difficulty_check",
     "skill_check": "_tool_skill_check",
     "combat_attack": "_tool_combat_attack",
-    "madness_check": "_tool_madness_check",
     "get_player_state": "_tool_get_player_state",
     "get_npc_state": "_tool_get_npc_state",
     "create_npc": "_tool_create_npc",
@@ -337,10 +308,8 @@ class GameMaster:
         self.scene_npcs: List[str] = []
 
         # -- Subsystems --
-        initial_madness = self.player.attributes.get("madness", 0)
         self.player_state = StateMachine(
             max_hp=calc_max_hp(self.player.attributes),
-            madness=initial_madness,
         )
 
         status("初始化记忆存储 (ChromaDB)...")
@@ -356,9 +325,9 @@ class GameMaster:
         # -- Recent events queue --
         self._recent_events: deque = deque(maxlen=10)
 
-        # -- World state tracking --
-        self._time_of_day: str = "黄昏"
-        self._weather: str = "阴"
+        # -- World state tracking (set by opening/LGM; defaults for empty state) --
+        self._time_of_day: str = "未知"
+        self._weather: str = "未知"
 
         # -- Game over flag --
         self._game_over: bool = False
@@ -366,11 +335,27 @@ class GameMaster:
         # -- Previous turn response (for suggestion continuity) --
         self._last_gm_response: str = ""
 
+        # -- World simulation counters (auto NPC actions) --
+        self._turn_count: int = 0
+        self._last_scene_context: str = ""
+        self._world_event_counter: int = 0
+
         # -- Register backstory NPCs (LLM must be connected first) --
         if self._llm_available:
             self._register_backstory_npcs()
         elif self.debug:
             print("[DEBUG] LLM 未连接，跳过后设故事 NPC 注册")
+
+        # -- World Builder (LLM-driven NPC/world creation) --
+        self.world_builder = None
+        if self._llm_available:
+            from trpg_agent.world_builder import WorldBuilder
+            self.world_builder = WorldBuilder(
+                llm=self.llm,
+                npc_store=self.npc_store,
+                knowledge=self.knowledge,
+                debug=self.debug,
+            )
 
     # ===================================================================
     #  SOFT-DELETED: embedding-based event classification
@@ -413,6 +398,41 @@ class GameMaster:
     # ------------------------------------------------------------------
     #  Backstory NPC registration
     # ------------------------------------------------------------------
+
+    def _generate_npc_attributes(
+        self, name: str, core: list[str], personality_tone: str
+    ) -> dict[str, int]:
+        """Generate NPC attributes based on role description via LLM.
+
+        Falls back to balanced defaults (10) if LLM is unavailable.
+        """
+        if not self._llm_available or not self.llm:
+            return {
+                "力量": 10, "敏捷": 10, "体质": 10,
+                "智力": 10, "感知": 10, "魅力": 10,
+            }
+
+        core_text = "\n".join(core)
+        try:
+            result = self.llm.chat_json(
+                system="你是TRPG角色设计师。根据角色描述，为该角色分配合理的属性值（1-20范围）。属性包括：力量、敏捷、体质、智力、感知、魅力。请根据角色特点合理分配，不要所有属性都一样。以JSON格式返回：{\"力量\": 12, \"敏捷\": 10, \"体质\": 11, \"智力\": 14, \"感知\": 13, \"魅力\": 8}",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": f"角色名称: {name}\n角色描述: {core_text}\n语调: {personality_tone}\n\n请为该角色分配属性。",
+                    }
+                ],
+            )
+            attrs = {}
+            for key in ["力量", "敏捷", "体质", "智力", "感知", "魅力"]:
+                val = result.get(key, 10)
+                attrs[key] = max(1, min(20, int(val)))
+            return attrs
+        except Exception:
+            return {
+                "力量": 10, "敏捷": 10, "体质": 10,
+                "智力": 10, "感知": 10, "魅力": 10,
+            }
 
     def _register_backstory_npcs(self) -> None:
         """Extract and register NPCs from the player's backstory using LLM."""
@@ -476,18 +496,12 @@ class GameMaster:
                 if not isinstance(relations, dict):
                     relations = {}
 
+                attributes = self._generate_npc_attributes(name, core, tone)
+
                 self.npc_store.create(
                     name=name,
                     core=core,
-                    attributes={
-                        "力量": 8,
-                        "敏捷": 10,
-                        "体质": 8,
-                        "智力": 10,
-                        "感知": 12,
-                        "魅力": 12,
-                        "灵性": 10,
-                    },
+                    attributes=attributes,
                     relations=relations,
                     personality={
                         "tone": tone,
@@ -702,27 +716,6 @@ class GameMaster:
 
         return result
 
-    def _tool_madness_check(self, params: dict) -> str:
-        """Execute madness_check tool."""
-        from trpg_agent.check import difficulty_check
-
-        difficulty = params.get("difficulty", 12)
-        delta = params.get("delta", 5)
-
-        result = difficulty_check(dc=difficulty)
-        roll_val = result["roll"]
-        total = result["total"]
-
-        if result["success"]:
-            return f"d20={roll_val} ≥ DC{difficulty} → 精神稳定，疯狂值不变"
-        else:
-            self.player_state.adjust_madness(delta)
-            new_madness = self.player_state.get_state()["madness"]
-            return (
-                f"d20={roll_val} < DC{difficulty} → 疯狂值+{delta} "
-                f"(当前 {new_madness}/100)"
-            )
-
     def _tool_get_player_state(self, params: dict) -> str:
         """Execute get_player_state tool."""
         ps = self.player_state.get_state()
@@ -730,8 +723,7 @@ class GameMaster:
             f"HP {ps['hp']}/{ps['max_hp']} | "
             f"情绪 {ps['emotion']} | "
             f"信任 {ps['trust']} | "
-            f"体力 {ps['stamina']} | "
-            f"疯狂 {ps.get('madness', 0)}/100 ({ps.get('madness_level', 'sane')})"
+            f"体力 {ps['stamina']}"
         )
 
     def _tool_get_npc_state(self, params: dict) -> str:
@@ -792,18 +784,13 @@ class GameMaster:
         if not isinstance(relations, dict):
             relations = {}
 
+        # Generate attributes based on NPC role (LLM-driven)
+        attributes = self._generate_npc_attributes(name, core, personality_tone)
+
         self.npc_store.create(
             name=name,
             core=core,
-            attributes={
-                "力量": 10,
-                "敏捷": 10,
-                "体质": 10,
-                "智力": 10,
-                "感知": 10,
-                "魅力": 10,
-                "灵性": 10,
-            },
+            attributes=attributes,
             personality={
                 "tone": personality_tone,
                 "verbal_tics": "无特殊语言习惯",
@@ -1030,8 +1017,13 @@ class GameMaster:
         if self.scene_npcs:
             scene_npcs_text = ", ".join(self.scene_npcs)
 
+        # -- World setting from config or custom --
+        world_setting = self.world.get("description", self.world.get("name", "未知世界"))
+
         system_prompt = (
-            _GM_SYSTEM_PROMPT.replace("{time_of_day}", self._time_of_day)
+            _GM_SYSTEM_PROMPT.replace("{world_setting}", world_setting)
+            .replace("{player_name}", self.player.name)
+            .replace("{time_of_day}", self._time_of_day)
             .replace("{weather}", self._weather)
             .replace("{scene_npcs}", scene_npcs_text)
             .replace("{player_card}", player_card)
@@ -1157,7 +1149,12 @@ class GameMaster:
         if suggestions:
             parts.append("")
             for i, s in enumerate(suggestions, 1):
-                parts.append(f"{i}. {s}")
+                # Strip leading numbers from LLM-generated suggestions to avoid "1. 1."
+                cleaned = s.lstrip()
+                import re
+                cleaned = re.sub(r'^\d+\.\s*', '', cleaned)
+                if cleaned:
+                    parts.append(f"{i}. {cleaned}")
         return "\n\n".join(parts)
 
     @staticmethod
@@ -1172,7 +1169,6 @@ class GameMaster:
             "difficulty_check",
             "skill_check",
             "combat_attack",
-            "madness_check",
         }
         if tool_name not in _CHECK_TOOLS:
             return None
@@ -1184,13 +1180,15 @@ class GameMaster:
     #  Public API
     # ===================================================================
 
-    def process(self, user_input: str) -> str:
+    def process(self, user_input: str, console=None) -> str:
         """单轮对话处理入口 — GM Agent 工具调用循环。
 
         Parameters
         ----------
         user_input : str
             玩家的输入文本。
+        console
+            Rich Console 对象，用于流式输出。若为 None 则不使用流式。
 
         Returns
         -------
@@ -1202,6 +1200,13 @@ class GameMaster:
             return "请说点什么吧。"
 
         self._last_user_input = user_input
+
+        # ---- Command routing: world builder → 交由 GM Agent 叙事 ----
+        if self.world_builder and user_input.startswith("!"):
+            world_result = self._handle_world_builder_command(user_input)
+            if world_result:
+                # 把命令结果作为上下文交给 GM Agent 做叙事过渡
+                return self._narrate_world_builder_result(world_result, user_input)
 
         if self.debug:
             print(f"\n{'─'*50}")
@@ -1225,6 +1230,19 @@ class GameMaster:
         all_involved: List[str] = []
         suggestions: List[str] = []
 
+        # Accumulated text for display
+        _display_text: str = ""
+
+        def _stream_text(text: str) -> None:
+            """流式输出文本到控制台。"""
+            nonlocal _display_text
+            if not text:
+                return
+            _display_text += text
+            if console:
+                from rich.text import Text
+                console.print(Text(text), end="")
+
         while tool_round < _MAX_TOOL_ROUNDS:
             try:
                 gm_json = self.llm.chat_json(system=system_prompt, messages=messages)
@@ -1233,16 +1251,15 @@ class GameMaster:
                     print(f"[DEBUG] LLM 调用失败: {e}")
                 return self._rebuild_response(user_input, [], [])
 
+            # 隐藏 thinking，只用于调试
             thinking = gm_json.get("thinking", "")
             narration = self._sanitize_narration(gm_json.get("narration", ""))
-            # Write sanitized narration back so LLM never sees its own fake checks
             gm_json["narration"] = narration
             tool_calls = gm_json.get("tool_calls", [])
             involved_npcs = gm_json.get("involved_npcs", [])
             persist_memory = gm_json.get("persist_memory", True)
             suggestions = gm_json.get("suggestions", [])
 
-            # Accumulate involved NPCs across rounds
             if isinstance(involved_npcs, list):
                 for npc_name in involved_npcs:
                     if (
@@ -1252,16 +1269,18 @@ class GameMaster:
                     ):
                         all_involved.append(npc_name)
 
-            if thinking:
-                all_narrations.append(f"[思考] {thinking}")
+            # thinking 不输出到终端，仅调试可见
             if narration:
+                if console and all_narrations:
+                    _stream_text("\n\n")
+                _stream_text(narration)
                 all_narrations.append(narration)
 
+            if self.debug and thinking:
+                print(
+                    f"[DEBUG] GM 思考: {thinking[:80]}{'...' if len(thinking) > 80 else ''}"
+                )
             if self.debug:
-                if thinking:
-                    print(
-                        f"[DEBUG] GM 思考: {thinking[:80]}{'...' if len(thinking) > 80 else ''}"
-                    )
                 print(
                     f"[DEBUG] GM 叙述: {narration[:80]}{'...' if len(narration) > 80 else ''}"
                 )
@@ -1271,7 +1290,6 @@ class GameMaster:
 
             # ---- No tool calls → done ----
             if not tool_calls:
-                # Guard: empty narration — retry once or fallback
                 if not narration and not thinking and not all_narrations:
                     _empty_retries += 1
                     if _empty_retries <= 1:
@@ -1319,16 +1337,17 @@ class GameMaster:
                 round_results.append(
                     f"- {tool_name}({json.dumps(params, ensure_ascii=False)}): {result}"
                 )
-                # Build player-visible check line
                 check_line = self._format_check_result(tool_name, result)
                 if check_line:
                     check_lines.append(check_line)
                 if self.debug:
                     print(f"[DEBUG] 工具结果: {result}")
 
-            # Append check results as a block after the narration
+            # Append check results after the narration
             if check_lines:
-                all_narrations.append("（" + "｜".join(check_lines) + "）")
+                check_text = "（" + "｜".join(check_lines) + "）"
+                _stream_text("\n" + check_text)
+                all_narrations.append(check_text)
 
             all_results.extend(round_results)
             tool_round += 1
@@ -1348,7 +1367,6 @@ class GameMaster:
             messages.append({"role": "user", "content": tool_feedback})
 
         else:
-            # Hit max tool rounds — force final response
             if self.debug:
                 print("[DEBUG] 达到最大工具调用轮次，返回当前叙述")
             if not self._game_over and persist_memory:
@@ -1361,11 +1379,32 @@ class GameMaster:
                 else self._render_accumulated(all_narrations, suggestions)
             )
 
+        # 输出建议（流式展示）
+        if suggestions:
+            _stream_text("\n\n")
+            for i, s in enumerate(suggestions, 1):
+                _stream_text(f"\n{i}. {s}")
+
+        # 世界自发事件：检查是否需要 NPC 自主行动
+        world_action = self._maybe_trigger_world_simulation(user_input)
+        if world_action:
+            _stream_text("\n\n" + world_action)
+
+        # 构建完整响应：包含叙述、建议、世界事件
+        if self._game_over:
+            response = "\n\n".join(all_narrations)
+        else:
+            response = self._render_accumulated(all_narrations, suggestions)
+
+        # 追加世界事件（如果尚未包含在叙述中）
+        if world_action:
+            response += "\n\n" + world_action
+
         if self.debug:
             state = self.player_state.get_state()
             print(
                 f"[DEBUG] 当前状态: 情绪={state['emotion']} 信任={state['trust']} "
-                f"体力={state['stamina']} 疯狂={state.get('madness', 0)}"
+                f"体力={state['stamina']}"
             )
             print(f"[DEBUG] 场景NPC: {self.scene_npcs}")
             print(f"{'─'*50}")
@@ -1397,7 +1436,7 @@ class GameMaster:
             "content": (
                 f"玩家: {user_input}\n"
                 f"检定结果: {tool_summary}\n"
-                f"玩家状态: HP {ps['hp']}/{ps['max_hp']} 疯狂 {ps.get('madness', 0)}\n"
+                f"玩家状态: HP {ps['hp']}/{ps['max_hp']}\n"
                 f"当前NPC: {npc_text}\n\n"
                 "请简述当前场景。"
             ),
@@ -1417,6 +1456,209 @@ class GameMaster:
             pass
 
         return self._fallback_response(user_input)
+
+    def _handle_world_builder_command(self, command: str) -> str:
+        """处理以 ! 开头的世界构建命令。
+
+        支持命令：
+        - `!npc <描述>` — 自然语言创建 NPC
+        - `!world <描述>` — 自然语言添加世界观知识
+        - `!simulate` — 模拟场景中 NPC 的自主行动
+
+        Parameters
+        ----------
+        command : str
+            以 ! 开头的命令文本。
+
+        Returns
+        -------
+        str
+            命令执行结果。
+        """
+        if not self.world_builder:
+            return "世界构建器未初始化（LLM 未连接）"
+
+        parts = command.split(maxsplit=1)
+        if len(parts) < 2:
+            return (
+                "用法：\n"
+                "!npc <自然语言描述NPC>\n"
+                "!world <自然语言描述世界观>\n"
+                "!simulate — 模拟场景NPC自主行动"
+            )
+
+        cmd = parts[0].lower()
+        desc = parts[1].strip()
+
+        if cmd == "!npc":
+            world_ctx = self.world.get("description", "")
+            return self.world_builder.create_npc_from_description(
+                description=desc,
+                world_context=world_ctx,
+                player_name=self.player.name,
+            )
+
+        elif cmd == "!world":
+            return self.world_builder.add_world_knowledge(description=desc)
+
+        elif cmd == "!simulate":
+            if not self.scene_npcs:
+                return "当前场景中没有 NPC 可以模拟行动"
+
+            actions = []
+            # 顺序模拟，让后行动的 NPC 知道先行动 NPC 的行为，避免矛盾
+            for npc_name in self.scene_npcs[:3]:
+                action = self.world_builder.simulate_npc_actions(
+                    npc_name=npc_name,
+                    scene_context=self.world.get("description", ""),
+                    time_of_day=self._time_of_day,
+                    weather=self._weather,
+                    other_npc_actions=actions,
+                )
+                if action:
+                    actions.append(action)
+
+            if actions:
+                return "【世界模拟】\n" + "\n".join(actions)
+            return "【世界模拟】场景中 NPC 此刻暂无自主行动"
+
+        else:
+            return (
+                f"未知命令: {cmd}\n"
+                "用法：\n"
+                "!npc <自然语言描述NPC>\n"
+                "!world <自然语言描述世界观>\n"
+                "!simulate — 模拟场景NPC自主行动"
+            )
+
+    def _narrate_world_builder_result(self, result: str, original_cmd: str) -> str:
+        """把世界构建命令的结果交给 GM Agent 做叙事过渡。
+
+        避免新 NPC/世界观"突然冒出来"的出戏感。
+        """
+        if not self._llm_available or not self.llm:
+            return result
+
+        scene_text = ", ".join(self.scene_npcs) if self.scene_npcs else "无人"
+
+        system = (
+            "玩家刚用世界构建能力创造了一个新角色或新知识。请用 1-2 句话自然地将这个变化融入当前场景。\n"
+            "如果是新 NPC，描述他/她如何出现在场景中（不要直接说'突然出现'，用合理的方式引入）。\n"
+            "如果是世界观知识，描述环境细节如何印证了这一知识。\n"
+            "用第二人称，不超过 100 字。\n"
+            "以 JSON 格式返回：\n"
+            '{\n'
+            '  "narration": "叙事过渡文本",\n'
+            '  "suggestions": ["建议1", "建议2", "建议3"]\n'
+            '}'
+        )
+
+        messages = [{
+            "role": "user",
+            "content": (
+                f"当前场景NPC：{scene_text}\n"
+                f"时间：{self._time_of_day} 天气：{self._weather}\n"
+                f"新创建的内容：{result}\n"
+                f"玩家的原始指令：{original_cmd}\n\n"
+                "请将这个变化自然地融入场景。"
+            ),
+        }]
+
+        try:
+            transition = self.llm.chat_json(system=system, messages=messages)
+            narration = transition.get("narration", result)
+            suggestions = transition.get("suggestions", [])
+
+            lines = [narration]
+            for i, s in enumerate(suggestions, 1):
+                lines.append(f"{i}. {s}")
+            return "\n\n".join(lines)
+        except Exception:
+            return result
+
+    def _maybe_trigger_world_simulation(self, user_input: str) -> Optional[str]:
+        """世界自发事件：根据游戏进度自动触发 NPC 自主行动。
+
+        触发条件（满足任一）：
+        1. 每 3 个玩家回合自动触发一次
+        2. 场景时间变化（如黄昏→夜晚）时触发
+        3. 场景中有 2+ 个 NPC 且玩家 5 轮未与他们互动
+
+        Returns
+        -------
+        str or None
+            世界事件叙述，如果不需要触发则返回 None。
+        """
+        if not self.world_builder or not self.scene_npcs:
+            self._turn_count += 1
+            return None
+
+        self._turn_count += 1
+        should_trigger = False
+        reason = ""
+
+        # 条件1: 每 3 轮自动触发
+        if self._turn_count % 3 == 0:
+            should_trigger = True
+            reason = "时间流逝"
+
+        # 条件2: 场景时间变化（由 GM Agent 的工具调用自动更新 self._time_of_day）
+        current_scene = f"{self._time_of_day}_{self._weather}"
+        if self._last_scene_context and self._last_scene_context != current_scene:
+            should_trigger = True
+            reason = f"时间变为{self._time_of_day}"
+        self._last_scene_context = current_scene
+
+        if not should_trigger:
+            return None
+
+        # 顺序模拟 NPC 自主行动
+        actions = []
+        for npc_name in self.scene_npcs[:3]:
+            action = self.world_builder.simulate_npc_actions(
+                npc_name=npc_name,
+                scene_context=self.world.get("description", ""),
+                time_of_day=self._time_of_day,
+                weather=self._weather,
+                other_npc_actions=actions,
+            )
+            if action:
+                actions.append(action)
+
+        if not actions:
+            return None
+
+        # 让 GM Agent 用自然的叙述方式包装这些行动
+        scene_text = ", ".join(self.scene_npcs)
+        actions_text = "\n".join(actions)
+
+        system = (
+            "以下 NPC 刚才在当前场景中自主行动了。请用 1-2 句话自然地叙述这些事件。\n"
+            "用第二人称描述玩家看到/听到/感知到的变化。\n"
+            "不超过 80 字。\n"
+            "以 JSON 格式返回：\n"
+            '{\n'
+            '  "narration": "世界事件叙述",\n'
+            '  "world_event": true\n'
+            '}'
+        )
+
+        messages = [{
+            "role": "user",
+            "content": (
+                f"当前场景NPC：{scene_text}\n"
+                f"触发原因：{reason}\n"
+                f"NPC 行动：\n{actions_text}\n\n"
+                "请将此自然地叙述给玩家。"
+            ),
+        }]
+
+        try:
+            result = self.llm.chat_json(system=system, messages=messages)
+            narration = result.get("narration", actions_text)
+            return f"\n{self._time_of_day}——{narration}"
+        except Exception:
+            return "与此同时——\n" + "\n".join(actions)
 
     def _fallback_response(self, user_input: str) -> str:
         """Generate a simple response when LLM is unavailable."""
@@ -1446,10 +1688,10 @@ class GameMaster:
             return (
                 f"{self.player.summary()}\n\n"
                 f"【当前状态】\n"
+                f"HP: {state['hp']}/{state['max_hp']}\n"
                 f"情绪：{state['emotion']}\n"
                 f"信任度：{state['trust']}\n"
-                f"体力：{state['stamina']}\n"
-                f"疯狂值：{state.get('madness', 0)}/100 ({state.get('madness_level', 'sane')})"
+                f"体力：{state['stamina']}"
             )
 
         return f"你站在{self.world.get('name', '未知世界')}中，四周弥漫着雾气。冒险等待着你..."
@@ -1525,8 +1767,19 @@ class GameMaster:
     #  Opening scene generation
     # ------------------------------------------------------------------
 
-    def generate_opening(self) -> str:
+    def generate_opening(
+        self,
+        custom_worldview: str = "",
+        custom_npc_setup: str = "",
+    ) -> str:
         """Generate the opening scene narration and seed 2-3 starter NPCs.
+
+        Parameters
+        ----------
+        custom_worldview : str
+            自定义世界观描述（自然语言），若为空则使用 config.yaml 中的默认设定。
+        custom_npc_setup : str
+            自定义初始 NPC 描述（自然语言），若为空则仅注册背景故事中的 NPC。
 
         The LLM returns JSON with ``narration`` and ``npcs`` so the world
         begins with interactive characters already present.
@@ -1537,7 +1790,13 @@ class GameMaster:
                 f"欢迎来到{world_name}。你是{self.player.name}。\n" f"冒险即将开始..."
             )
 
-        world_desc = self.world.get("description", self.world.get("name", ""))
+        # 优先使用自定义世界观，否则用 config.yaml 默认
+        if custom_worldview:
+            world_desc = custom_worldview.strip()
+            # 同步更新 GM 的世界状态
+            self.world["description"] = world_desc
+        else:
+            world_desc = self.world.get("description", self.world.get("name", ""))
         player_desc = "，".join(self.player.core)
         player_card = self.player.summary()
 
@@ -1561,14 +1820,23 @@ class GameMaster:
                 + "\n".join(f"- {n}" for n in self.scene_npcs)
             )
 
+        # 自定义 NPC 描述（自然语言）
+        npc_instruction = ""
+        if custom_npc_setup:
+            npc_instruction = (
+                f"\n\n玩家自定义了以下初始角色，请解析并创建：\n{custom_npc_setup}\n"
+                f"请从中提取有名字、有身份的角色，注册为 NPC 并加入场景。"
+            )
+
         if scenario_text:
             system = (
-                f"你是 TRPG 主持人，主持《诡秘之主》世界的跑团游戏。\n"
+                f"你是 TRPG 主持人。\n"
+                f"世界设定：{world_desc}\n\n"
                 f"玩家扮演 {self.player.name}，{player_desc}\n"
                 f"途径：{getattr(self.player, 'pathway', '未知')}，"
                 f"序列{getattr(self.player, 'sequence', 9)}\n"
-                f"世界：{world_desc}\n\n"
                 f"以下剧本已加载，请严格按照剧本节点0生成开场：\n{scenario_text}\n\n"
+                f'以 JSON 格式回复：\n'
                 f'{{"narration": "开场叙述（不超过200字）", '
                 f'"npcs": [{{"name": "NPC称呼", "core": ["角色描述"], '
                 f'"relations": {{"{self.player.name}": "关系"}}}}], '
@@ -1577,14 +1845,15 @@ class GameMaster:
                 f"- 严格按照剧本节点0的核心事件生成开场\n"
                 f"- 只注册当前物理在场的角色。任务目标、传闻人物只在 narration 提及即可\n"
                 f"{existing_npc_text}"
+                f"{npc_instruction}"
             )
         else:
             system = (
-                f"你是 TRPG 主持人，主持《诡秘之主》世界的跑团游戏。\n"
+                f"你是 TRPG 主持人。\n"
+                f"世界设定：{world_desc}\n\n"
                 f"玩家扮演 {self.player.name}，{player_desc}\n"
                 f"途径：{getattr(self.player, 'pathway', '未知')}，"
-                f"序列{getattr(self.player, 'sequence', 9)}\n"
-                f"世界：{world_desc}\n\n"
+                f"序列{getattr(self.player, 'sequence', 9)}\n\n"
                 f"请设计冒险的开场场景，并以 JSON 格式回复：\n\n"
                 f'{{"narration": "开场叙述（不超过200字）", '
                 f'"npcs": [{{"name": "NPC称呼", "core": ["角色描述"], '
@@ -1595,6 +1864,7 @@ class GameMaster:
                 f"- 简要设定场景，1-2句环境描写后迅速引入NPC和事件线索\n"
                 f"- 只注册当前物理在场的角色。任务目标、传闻人物只在 narration 提及即可\n"
                 f"{existing_npc_text}"
+                f"{npc_instruction}"
             )
 
         if memory_text:
@@ -1636,19 +1906,33 @@ class GameMaster:
                         self.scene_npcs.append(name)
                     continue
 
+                # Determine personality_tone from core description
+                tone = "正常"
+                if core:
+                    first_core = str(core[0]) if core else ""
+                    if any(kw in first_core for kw in ["温柔", "活泼", "开朗"]):
+                        tone = "温和友好"
+                    elif any(kw in first_core for kw in ["冷酷", "严肃", "沉默"]):
+                        tone = "冷淡严肃"
+                    elif any(kw in first_core for kw in ["狡猾", "精明", "圆滑"]):
+                        tone = "精明圆滑"
+
+                attributes = self._generate_npc_attributes(name, core, tone)
+
                 self.npc_store.create(
                     name=name,
                     core=core,
-                    attributes={
-                        "力量": 10,
-                        "敏捷": 10,
-                        "体质": 10,
-                        "智力": 10,
-                        "感知": 10,
-                        "魅力": 10,
-                        "灵性": 10,
-                    },
+                    attributes=attributes,
                     relations=relations,
+                    personality={
+                        "tone": tone,
+                        "verbal_tics": "无特殊语言习惯",
+                        "emotion_map": {
+                            "calm": f"以{tone}的态度说话",
+                            "wary": "警惕地观察",
+                            "hostile": "表现出敌意",
+                        },
+                    },
                 )
                 if name not in self.scene_npcs:
                     self.scene_npcs.append(name)
@@ -1696,6 +1980,8 @@ class GameMaster:
             "scene_npcs": self.scene_npcs,
             "recent_events": list(self._recent_events),
             "last_gm_response": self._last_gm_response,
+            "turn_count": self._turn_count,
+            "last_scene_context": self._last_scene_context,
             "updated_at": datetime.datetime.now().isoformat(),
         }
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
@@ -1715,6 +2001,8 @@ class GameMaster:
         self.scene_npcs = data.get("scene_npcs", [])
         self._recent_events = deque(data.get("recent_events", []), maxlen=10)
         self._last_gm_response = data.get("last_gm_response", "")
+        self._turn_count = data.get("turn_count", 0)
+        self._last_scene_context = data.get("last_scene_context", "")
 
         ps = data.get("player_state", {})
         if ps:

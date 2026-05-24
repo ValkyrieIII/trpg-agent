@@ -141,7 +141,7 @@ def main() -> None:
                 if not expr:
                     reply = "请指定骰子表达式，例如：/dice 3d6"
                 else:
-                    reply = gm.process(f"掷骰 {expr}")
+                    reply = gm.process(f"掷骰 {expr}", console=console)
             elif user_input.startswith("/clear_npc"):
                 arg = user_input[len("/clear_npc") :].strip()
                 if not arg:
@@ -158,7 +158,7 @@ def main() -> None:
             else:
                 reply = f"未知命令：{user_input}"
         else:
-            reply = gm.process(user_input)
+            reply = gm.process(user_input, console=console)
 
         # ---- Check game over ----
         if gm._game_over:
@@ -172,14 +172,18 @@ def main() -> None:
             console.print("[dim]角色已死亡。冒险结束。[/dim]")
             break
 
-        # ---- Display response ----
-        console.print(
-            Panel(
-                reply,
-                title="[bold]冒险日志[/bold]",
-                border_style="green",
+        # ---- Display response (suggestions / world events) ----
+        if reply and reply.strip():
+            console.print(
+                Panel(
+                    reply.strip(),
+                    title="[bold]建议[/bold]" if not reply.startswith("【世界模拟】") else "[bold]世界事件[/bold]",
+                    border_style="green",
+                )
             )
-        )
+        else:
+            # 流式叙述已完成，打印空行分隔
+            console.print()
 
 
 if __name__ == "__main__":
