@@ -11,9 +11,10 @@ export interface PlayerState {
 
 export interface Message {
   id: string
-  role: 'gm' | 'player'
+  role: 'gm' | 'player' | 'npc'
   content: string
   timestamp: number
+  npcName?: string  // NPC name, only for role='npc'
 }
 
 export interface NPCInfo {
@@ -42,7 +43,7 @@ export interface ToolCallInfo {
 interface GameState {
   // Messages
   messages: Message[]
-  addMessage: (role: 'gm' | 'player', content: string) => void
+  addMessage: (role: 'gm' | 'player' | 'npc', content: string, npcName?: string) => void
   clearMessages: () => void
 
   // Streaming
@@ -98,11 +99,11 @@ interface GameState {
 
 export const useGameStore = create<GameState>((set) => ({
   messages: [],
-  addMessage: (role, content) =>
+  addMessage: (role, content, npcName?) =>
     set((state) => ({
       messages: [
         ...state.messages,
-        { id: `${Date.now()}-${Math.random()}`, role, content, timestamp: Date.now() },
+        { id: `${Date.now()}-${Math.random()}`, role, content, timestamp: Date.now(), npcName },
       ],
     })),
   clearMessages: () => set({ messages: [] }),

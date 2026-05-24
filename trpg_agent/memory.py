@@ -419,6 +419,26 @@ class MemoryStore:
         with open(self._graph_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
+    def clear(self) -> None:
+        """Delete all memories from both ChromaDB collections and reset the graph."""
+        # Clear main memories
+        try:
+            all_ids = self._collection.get()["ids"]
+            if all_ids:
+                self._collection.delete(ids=all_ids)
+        except Exception:
+            pass
+        # Clear NPC memories
+        try:
+            all_npc_ids = self._npc_collection.get()["ids"]
+            if all_npc_ids:
+                self._npc_collection.delete(ids=all_npc_ids)
+        except Exception:
+            pass
+        # Reset graph
+        self._graph.clear()
+        self._save_graph()
+
     def _load_graph(self) -> None:
         """Deserialise the NetworkX graph from ``memory_graph.json``.
 

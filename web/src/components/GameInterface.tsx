@@ -88,6 +88,11 @@ export default function GameInterface() {
                   setCurrentTool({ tool: parsed.tool, display: parsed.display, result: null })
                 } else if (parsed.type === 'tool_call_end') {
                   setAgentStatus('idle')
+                } else if (parsed.type === 'npc_message') {
+                  // NPC dialogue — add as a separate NPC message bubble
+                  if (parsed.npc_name && parsed.npc_text) {
+                    addMessage('npc', parsed.npc_text, parsed.npc_name)
+                  }
                 }
               } else if (parsed.text) {
                 fullText += parsed.text
@@ -268,6 +273,22 @@ function MessageBubble({ message }: { message: Message }) {
     return (
       <div className="chat-bubble-player animate-slide-up">
         <p className="whitespace-pre-wrap text-coal-200">{message.content}</p>
+      </div>
+    )
+  }
+
+  if (message.role === 'npc') {
+    return (
+      <div className="animate-fade-in flex items-start gap-3">
+        <div className="flex-shrink-0 w-9 h-9 rounded-full bg-gradient-to-br from-emerald-800 to-emerald-950 border border-emerald-600/40 flex items-center justify-center text-emerald-300 text-sm font-bold shadow-lg">
+          {(message.npcName || '?').charAt(0)}
+        </div>
+        <div className="flex-1 min-w-0">
+          <p className="text-xs text-emerald-400 font-medium mb-1">{message.npcName || 'NPC'}</p>
+          <div className="bg-emerald-950/40 border border-emerald-700/30 rounded-lg rounded-tl-none px-4 py-2.5">
+            <p className="whitespace-pre-wrap text-emerald-100 leading-relaxed">{message.content}</p>
+          </div>
+        </div>
       </div>
     )
   }

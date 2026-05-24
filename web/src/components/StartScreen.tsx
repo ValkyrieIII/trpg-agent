@@ -168,32 +168,24 @@ export default function StartScreen() {
 
           {mode === 'new' ? (
             <div className="space-y-4">
-              {/* Worldview input */}
-              <div>
+              {/* Worldview - disabled */}
+              <div className="relative">
                 <label className="block text-sm text-coal-300 mb-1">
-                  世界观设定 <span className="text-coal-500">(可选，留空使用默认)</span>
+                  世界观设定
                 </label>
-                <textarea
-                  value={worldView}
-                  onChange={(e) => setWorldView(e.target.value)}
-                  placeholder="例：蒸汽朋克世界，第五纪1350年，鲁恩王国首都贝克兰德..."
-                  className="input-field w-full h-20 resize-none text-sm"
-                  disabled={isLoading}
-                />
+                <div className="input-field w-full h-20 text-sm flex items-center justify-center text-coal-500 border-dashed">
+                  敬请期待
+                </div>
               </div>
 
-              {/* NPC setup */}
-              <div>
+              {/* NPC setup - disabled */}
+              <div className="relative">
                 <label className="block text-sm text-coal-300 mb-1">
-                  初始 NPC <span className="text-coal-500">(可选，用自然语言描述)</span>
+                  初始 NPC
                 </label>
-                <textarea
-                  value={npcSetup}
-                  onChange={(e) => setNpcSetup(e.target.value)}
-                  placeholder="例：我的妹妹艾莉西亚，温柔但倔强；邻居老马，退休的蒸汽工程师..."
-                  className="input-field w-full h-16 resize-none text-sm"
-                  disabled={isLoading}
-                />
+                <div className="input-field w-full h-16 text-sm flex items-center justify-center text-coal-500 border-dashed">
+                  敬请期待
+                </div>
               </div>
 
               {/* Advanced toggle */}

@@ -21,6 +21,7 @@ StatusEventType = Literal[
     "thinking_end",
     "tool_call_start",
     "tool_call_end",
+    "npc_message",
 ]
 
 
@@ -31,6 +32,8 @@ class StatusEvent:
     display: str | None = None          # human-readable e.g. "投骰子(2d6)"
     result: str | None = None           # tool result preview (tool_call_end)
     args_json: str | None = None        # raw arguments JSON
+    npc_name: str | None = None         # NPC name for npc_message events
+    npc_text: str | None = None         # NPC dialogue text for npc_message events
 
 
 # ---------------------------------------------------------------------------
@@ -119,3 +122,30 @@ class AgentStatusHooks(RunHooks):
     async def on_tool_end(self, context, agent, tool, result: str):
         tool_name = getattr(context, "tool_name", None) or getattr(tool, "qualified_name", "?")
         await self._queue.put(make_tool_event("tool_call_end", tool_name, result=result))
+
+        # Emit npc_message event when invoke_npc returns, so frontend can
+        # render NPC dialogue as a separate chat bubble (group-chat style).
+        if tool_name == "invoke_npc" and result:
+            npc_name, npc_text = _parse_npc_result(result)
+            if npc_name and npc_text:
+                await self._queue.put(StatusEvent(
+                    type="npc_message",
+                    npc_name=npc_name,
+                    npc_text=npc_text,
+                ))
+
+
+def _parse_npc_result(result: str) -> tuple[str, str]:
+    """Parse invoke_npc tool result into (npc_name, npc_text).
+
+    The tool returns format:  'NPC名: "对话内容"'
+    """
+    import re
+    match = re.match(r'^(.+?):\s*[""「](.+?)[""」]$', result.strip(), re.DOTALL)
+    if match:
+        return match.group(1).strip(), match.group(2).strip()
+    # Fallback: split on first colon
+    if ':' in result:
+        name, text = result.split(':', 1)
+        return name.strip(), text.strip().strip('"').strip('"').strip('「」')
+    return "", result

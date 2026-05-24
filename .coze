@@ -1,0 +1,10 @@
+[project]
+requires = ["nodejs-24"]
+
+[dev]
+build = ["bash", "-c", "cd web && pnpm install"]
+run = ["bash", "/workspace/projects/start.sh"]
+
+[deploy]
+build = ["bash", "-c", "pip install -r requirements.txt && cd web && pnpm install && pnpm run build"]
+run = ["bash", "-c", "cd /workspace/projects && python -m uvicorn trpg_agent.api_server:app --host 0.0.0.0 --port 8000 & cd web && npx vite preview --host 0.0.0.0 --port 5000"]

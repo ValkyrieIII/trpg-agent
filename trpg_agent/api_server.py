@@ -73,6 +73,11 @@ def _get_gm() -> GameMaster:
 async def api_start(body: dict = {}):
     """开始新游戏。支持自定义世界观和NPC。"""
     try:
+        # 开新游戏：销毁旧 GM 实例，清空记忆库，重建全新 GM
+        global _gm
+        if _gm is not None:
+            _gm.memory.clear()
+        _gm = None
         gm = _get_gm()
 
         # 接收前端传入的自定义世界观和NPC
@@ -229,6 +234,8 @@ async def api_action(body: dict):
                     'tool': chunk.tool,
                     'display': chunk.display,
                     'result': chunk.result,
+                    'npc_name': chunk.npc_name,
+                    'npc_text': chunk.npc_text,
                 }, ensure_ascii=False)
             elif chunk:
                 data = json.dumps({'text': chunk}, ensure_ascii=False)

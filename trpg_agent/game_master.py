@@ -1132,10 +1132,7 @@ class GameMaster:
 
         # -- Player input --
         parts.append(f"玩家: {user_input}")
-        parts.append(
-            "输出格式（严格JSON，不要输出其他内容）：\n"
-            '{"narration": "场景叙述（不超过150字）", "suggestions": ["建议1", "建议2", "建议3"]}'
-        )
+        parts.append("请按系统提示词中定义的 JSON 格式回复（只包含 narration 和 suggestions）。")
 
         return "\n\n".join(parts)
 
@@ -1455,6 +1452,51 @@ class GameMaster:
 
         elapsed_ms = int((time.time() - t0) * 1000)
 
+        # ---- Parse JSON output: narration + suggestions ----
+        self._last_suggestions = []
+        narration = response  # fallback
+        try:
+            parsed = json.loads(response.strip())
+            if isinstance(parsed, dict):
+                narration = parsed.get("narration", response)
+                self._last_suggestions = parsed.get("suggestions", [])
+        except (json.JSONDecodeError, TypeError):
+            # Try markdown code block extraction
+            stripped = response.strip()
+            code_block_match = re.match(r'^```(?:json)?\s*\n?(.*?)\n?```$', stripped, re.DOTALL)
+            if code_block_match:
+                try:
+                    parsed = json.loads(code_block_match.group(1).strip())
+                    if isinstance(parsed, dict):
+                        narration = parsed.get("narration", code_block_match.group(1))
+                        self._last_suggestions = parsed.get("suggestions", [])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            # Try to find JSON object in the text
+            if narration == response and not self._last_suggestions:
+                json_match = re.search(r'\{[^{}]*"narration"[^{}]*\}', stripped, re.DOTALL)
+                if json_match:
+                    try:
+                        parsed = json.loads(json_match.group(0))
+                        if isinstance(parsed, dict):
+                            narration = parsed.get("narration", response)
+                            self._last_suggestions = parsed.get("suggestions", [])
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+            # Last resort: strip numbered suggestion lines from narration
+            if narration == response:
+                lines = narration.strip().split('\n')
+                clean_lines = []
+                suggestion_lines = []
+                for line in lines:
+                    if re.match(r'^\d+\.\s+', line.strip()):
+                        suggestion_lines.append(re.sub(r'^\d+\.\s+', '', line.strip()))
+                    else:
+                        clean_lines.append(line)
+                if suggestion_lines:
+                    narration = '\n'.join(clean_lines).strip()
+                    self._last_suggestions = suggestion_lines
+
         # ---- Debug: aggregate tool-level entries ----
         if self.debug:
             self._debug(f"[GM] Runner 完成  |  耗时 {elapsed_ms}ms  |  输出 {len(response)}字符  |  "
@@ -1489,7 +1531,7 @@ class GameMaster:
         # ---- World simulation (kept external trigger) ----
         world_action = self._maybe_trigger_world_simulation(user_input)
         if world_action:
-            response += "\n\n" + world_action
+            narration += "\n\n" + world_action
 
         if self.debug:
             state = self.player_state.get_state()
@@ -1499,8 +1541,8 @@ class GameMaster:
                 f"体力 {state['stamina']}  |  在场 {self.scene_npcs or '无'}"
             )
 
-        self._last_gm_response = response
-        return response
+        self._last_gm_response = narration
+        return narration
 
     async def process_streaming(self, user_input: str) -> AsyncGenerator["str | StatusEvent", None]:
         """Async generator — yields text chunks and StatusEvents in real time.
@@ -1613,7 +1655,46 @@ class GameMaster:
                 narration = parsed.get("narration", full_response)
                 self._last_suggestions = parsed.get("suggestions", [])
         except (json.JSONDecodeError, TypeError):
-            pass  # non-JSON output, use raw text as narration
+            # JSON parse failed — try to extract content from raw LLM output
+            # Strip markdown code blocks if present (```json ... ```)
+            stripped = full_response.strip()
+            code_block_match = re.match(r'^```(?:json)?\s*\n?(.*?)\n?```$', stripped, re.DOTALL)
+            if code_block_match:
+                try:
+                    parsed = json.loads(code_block_match.group(1).strip())
+                    if isinstance(parsed, dict):
+                        narration = parsed.get("narration", code_block_match.group(1))
+                        self._last_suggestions = parsed.get("suggestions", [])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+            # If still not parsed, try to find JSON object in the text
+            if narration == full_response and not self._last_suggestions:
+                json_match = re.search(r'\{[^{}]*"narration"[^{}]*\}', stripped, re.DOTALL)
+                if json_match:
+                    try:
+                        parsed = json.loads(json_match.group(0))
+                        if isinstance(parsed, dict):
+                            narration = parsed.get("narration", full_response)
+                            self._last_suggestions = parsed.get("suggestions", [])
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+
+            # Last resort: strip out numbered suggestion lines from raw text
+            # so they don't appear in the chat bubble
+            if narration == full_response:
+                # Remove lines like "1. xxx" or "2. xxx" from the end of narration
+                lines = narration.strip().split('\n')
+                clean_lines = []
+                suggestion_lines = []
+                for line in lines:
+                    if re.match(r'^\d+\.\s+', line.strip()):
+                        suggestion_lines.append(re.sub(r'^\d+\.\s+', '', line.strip()))
+                    else:
+                        clean_lines.append(line)
+                if suggestion_lines:
+                    narration = '\n'.join(clean_lines).strip()
+                    self._last_suggestions = suggestion_lines
 
         if self.debug:
             self._debug(f"[GM] Runner 完成  |  耗时 {elapsed_ms}ms  |  "
