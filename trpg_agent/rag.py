@@ -263,6 +263,7 @@ class KnowledgeBase:
         os.makedirs(persist_dir, exist_ok=True)
 
         self._client = chromadb.PersistentClient(path=persist_dir)
+        hf_endpoint = os.environ.get("HF_ENDPOINT", "https://huggingface.co")
         self._embedding_fn = SentenceTransformerEmbeddingFunction(
             model_name="BAAI/bge-small-zh-v1.5",
         )

@@ -366,11 +366,27 @@ class GameMaster:
         # -- Previous turn response (for suggestion continuity) --
         self._last_gm_response: str = ""
 
+        # -- World simulation counters (auto NPC actions) --
+        self._turn_count: int = 0
+        self._last_scene_context: str = ""
+        self._world_event_counter: int = 0
+
         # -- Register backstory NPCs (LLM must be connected first) --
         if self._llm_available:
             self._register_backstory_npcs()
         elif self.debug:
             print("[DEBUG] LLM 未连接，跳过后设故事 NPC 注册")
+
+        # -- World Builder (LLM-driven NPC/world creation) --
+        self.world_builder = None
+        if self._llm_available:
+            from trpg_agent.world_builder import WorldBuilder
+            self.world_builder = WorldBuilder(
+                llm=self.llm,
+                npc_store=self.npc_store,
+                knowledge=self.knowledge,
+                debug=self.debug,
+            )
 
     # ===================================================================
     #  SOFT-DELETED: embedding-based event classification
@@ -1157,7 +1173,12 @@ class GameMaster:
         if suggestions:
             parts.append("")
             for i, s in enumerate(suggestions, 1):
-                parts.append(f"{i}. {s}")
+                # Strip leading numbers from LLM-generated suggestions to avoid "1. 1."
+                cleaned = s.lstrip()
+                import re
+                cleaned = re.sub(r'^\d+\.\s*', '', cleaned)
+                if cleaned:
+                    parts.append(f"{i}. {cleaned}")
         return "\n\n".join(parts)
 
     @staticmethod
@@ -1184,13 +1205,15 @@ class GameMaster:
     #  Public API
     # ===================================================================
 
-    def process(self, user_input: str) -> str:
+    def process(self, user_input: str, console=None) -> str:
         """单轮对话处理入口 — GM Agent 工具调用循环。
 
         Parameters
         ----------
         user_input : str
             玩家的输入文本。
+        console
+            Rich Console 对象，用于流式输出。若为 None 则不使用流式。
 
         Returns
         -------
@@ -1202,6 +1225,13 @@ class GameMaster:
             return "请说点什么吧。"
 
         self._last_user_input = user_input
+
+        # ---- Command routing: world builder → 交由 GM Agent 叙事 ----
+        if self.world_builder and user_input.startswith("!"):
+            world_result = self._handle_world_builder_command(user_input)
+            if world_result:
+                # 把命令结果作为上下文交给 GM Agent 做叙事过渡
+                return self._narrate_world_builder_result(world_result, user_input)
 
         if self.debug:
             print(f"\n{'─'*50}")
@@ -1225,6 +1255,19 @@ class GameMaster:
         all_involved: List[str] = []
         suggestions: List[str] = []
 
+        # Accumulated text for display
+        _display_text: str = ""
+
+        def _stream_text(text: str) -> None:
+            """流式输出文本到控制台。"""
+            nonlocal _display_text
+            if not text:
+                return
+            _display_text += text
+            if console:
+                from rich.text import Text
+                console.print(Text(text), end="")
+
         while tool_round < _MAX_TOOL_ROUNDS:
             try:
                 gm_json = self.llm.chat_json(system=system_prompt, messages=messages)
@@ -1233,16 +1276,15 @@ class GameMaster:
                     print(f"[DEBUG] LLM 调用失败: {e}")
                 return self._rebuild_response(user_input, [], [])
 
+            # 隐藏 thinking，只用于调试
             thinking = gm_json.get("thinking", "")
             narration = self._sanitize_narration(gm_json.get("narration", ""))
-            # Write sanitized narration back so LLM never sees its own fake checks
             gm_json["narration"] = narration
             tool_calls = gm_json.get("tool_calls", [])
             involved_npcs = gm_json.get("involved_npcs", [])
             persist_memory = gm_json.get("persist_memory", True)
             suggestions = gm_json.get("suggestions", [])
 
-            # Accumulate involved NPCs across rounds
             if isinstance(involved_npcs, list):
                 for npc_name in involved_npcs:
                     if (
@@ -1252,16 +1294,18 @@ class GameMaster:
                     ):
                         all_involved.append(npc_name)
 
-            if thinking:
-                all_narrations.append(f"[思考] {thinking}")
+            # thinking 不输出到终端，仅调试可见
             if narration:
+                if console and all_narrations:
+                    _stream_text("\n\n")
+                _stream_text(narration)
                 all_narrations.append(narration)
 
+            if self.debug and thinking:
+                print(
+                    f"[DEBUG] GM 思考: {thinking[:80]}{'...' if len(thinking) > 80 else ''}"
+                )
             if self.debug:
-                if thinking:
-                    print(
-                        f"[DEBUG] GM 思考: {thinking[:80]}{'...' if len(thinking) > 80 else ''}"
-                    )
                 print(
                     f"[DEBUG] GM 叙述: {narration[:80]}{'...' if len(narration) > 80 else ''}"
                 )
@@ -1271,7 +1315,6 @@ class GameMaster:
 
             # ---- No tool calls → done ----
             if not tool_calls:
-                # Guard: empty narration — retry once or fallback
                 if not narration and not thinking and not all_narrations:
                     _empty_retries += 1
                     if _empty_retries <= 1:
@@ -1319,16 +1362,17 @@ class GameMaster:
                 round_results.append(
                     f"- {tool_name}({json.dumps(params, ensure_ascii=False)}): {result}"
                 )
-                # Build player-visible check line
                 check_line = self._format_check_result(tool_name, result)
                 if check_line:
                     check_lines.append(check_line)
                 if self.debug:
                     print(f"[DEBUG] 工具结果: {result}")
 
-            # Append check results as a block after the narration
+            # Append check results after the narration
             if check_lines:
-                all_narrations.append("（" + "｜".join(check_lines) + "）")
+                check_text = "（" + "｜".join(check_lines) + "）"
+                _stream_text("\n" + check_text)
+                all_narrations.append(check_text)
 
             all_results.extend(round_results)
             tool_round += 1
@@ -1348,7 +1392,6 @@ class GameMaster:
             messages.append({"role": "user", "content": tool_feedback})
 
         else:
-            # Hit max tool rounds — force final response
             if self.debug:
                 print("[DEBUG] 达到最大工具调用轮次，返回当前叙述")
             if not self._game_over and persist_memory:
@@ -1360,6 +1403,34 @@ class GameMaster:
                 "\n\n".join(all_narrations) if self._game_over
                 else self._render_accumulated(all_narrations, suggestions)
             )
+
+        # 输出建议
+        if suggestions:
+            _stream_text("\n\n")
+            for i, s in enumerate(suggestions, 1):
+                _stream_text(f"\n{i}. {s}")
+
+        # 世界自发事件：检查是否需要 NPC 自主行动
+        world_action = self._maybe_trigger_world_simulation(user_input)
+        if world_action:
+            _stream_text("\n\n" + world_action)
+            response += "\n\n" + world_action
+
+        # 返回完整响应：流式输出已完成叙述，response 只含后续补充
+        # _display_text 用于调试/日志，不返回给 main.py
+        response = ""
+        # 如果有世界事件，追加到 response
+        if world_action:
+            response = world_action
+        # 如果有建议，追加到 response
+        if suggestions:
+            if response:
+                response += "\n\n"
+            for i, s in enumerate(suggestions, 1):
+                import re
+                cleaned = re.sub(r'^\d+\.\s*', '', s.lstrip())
+                if cleaned:
+                    response += f"{i}. {cleaned}\n"
 
         if self.debug:
             state = self.player_state.get_state()
@@ -1417,6 +1488,209 @@ class GameMaster:
             pass
 
         return self._fallback_response(user_input)
+
+    def _handle_world_builder_command(self, command: str) -> str:
+        """处理以 ! 开头的世界构建命令。
+
+        支持命令：
+        - `!npc <描述>` — 自然语言创建 NPC
+        - `!world <描述>` — 自然语言添加世界观知识
+        - `!simulate` — 模拟场景中 NPC 的自主行动
+
+        Parameters
+        ----------
+        command : str
+            以 ! 开头的命令文本。
+
+        Returns
+        -------
+        str
+            命令执行结果。
+        """
+        if not self.world_builder:
+            return "世界构建器未初始化（LLM 未连接）"
+
+        parts = command.split(maxsplit=1)
+        if len(parts) < 2:
+            return (
+                "用法：\n"
+                "!npc <自然语言描述NPC>\n"
+                "!world <自然语言描述世界观>\n"
+                "!simulate — 模拟场景NPC自主行动"
+            )
+
+        cmd = parts[0].lower()
+        desc = parts[1].strip()
+
+        if cmd == "!npc":
+            world_ctx = self.world.get("description", "")
+            return self.world_builder.create_npc_from_description(
+                description=desc,
+                world_context=world_ctx,
+                player_name=self.player.name,
+            )
+
+        elif cmd == "!world":
+            return self.world_builder.add_world_knowledge(description=desc)
+
+        elif cmd == "!simulate":
+            if not self.scene_npcs:
+                return "当前场景中没有 NPC 可以模拟行动"
+
+            actions = []
+            # 顺序模拟，让后行动的 NPC 知道先行动 NPC 的行为，避免矛盾
+            for npc_name in self.scene_npcs[:3]:
+                action = self.world_builder.simulate_npc_actions(
+                    npc_name=npc_name,
+                    scene_context=self.world.get("description", ""),
+                    time_of_day=self._time_of_day,
+                    weather=self._weather,
+                    other_npc_actions=actions,
+                )
+                if action:
+                    actions.append(action)
+
+            if actions:
+                return "【世界模拟】\n" + "\n".join(actions)
+            return "【世界模拟】场景中 NPC 此刻暂无自主行动"
+
+        else:
+            return (
+                f"未知命令: {cmd}\n"
+                "用法：\n"
+                "!npc <自然语言描述NPC>\n"
+                "!world <自然语言描述世界观>\n"
+                "!simulate — 模拟场景NPC自主行动"
+            )
+
+    def _narrate_world_builder_result(self, result: str, original_cmd: str) -> str:
+        """把世界构建命令的结果交给 GM Agent 做叙事过渡。
+
+        避免新 NPC/世界观"突然冒出来"的出戏感。
+        """
+        if not self._llm_available or not self.llm:
+            return result
+
+        scene_text = ", ".join(self.scene_npcs) if self.scene_npcs else "无人"
+
+        system = (
+            "玩家刚用世界构建能力创造了一个新角色或新知识。请用 1-2 句话自然地将这个变化融入当前场景。\n"
+            "如果是新 NPC，描述他/她如何出现在场景中（不要直接说'突然出现'，用合理的方式引入）。\n"
+            "如果是世界观知识，描述环境细节如何印证了这一知识。\n"
+            "用第二人称，不超过 100 字。\n"
+            "以 JSON 格式返回：\n"
+            '{\n'
+            '  "narration": "叙事过渡文本",\n'
+            '  "suggestions": ["建议1", "建议2", "建议3"]\n'
+            '}'
+        )
+
+        messages = [{
+            "role": "user",
+            "content": (
+                f"当前场景NPC：{scene_text}\n"
+                f"时间：{self._time_of_day} 天气：{self._weather}\n"
+                f"新创建的内容：{result}\n"
+                f"玩家的原始指令：{original_cmd}\n\n"
+                "请将这个变化自然地融入场景。"
+            ),
+        }]
+
+        try:
+            transition = self.llm.chat_json(system=system, messages=messages)
+            narration = transition.get("narration", result)
+            suggestions = transition.get("suggestions", [])
+
+            lines = [narration]
+            for i, s in enumerate(suggestions, 1):
+                lines.append(f"{i}. {s}")
+            return "\n\n".join(lines)
+        except Exception:
+            return result
+
+    def _maybe_trigger_world_simulation(self, user_input: str) -> Optional[str]:
+        """世界自发事件：根据游戏进度自动触发 NPC 自主行动。
+
+        触发条件（满足任一）：
+        1. 每 3 个玩家回合自动触发一次
+        2. 场景时间变化（如黄昏→夜晚）时触发
+        3. 场景中有 2+ 个 NPC 且玩家 5 轮未与他们互动
+
+        Returns
+        -------
+        str or None
+            世界事件叙述，如果不需要触发则返回 None。
+        """
+        if not self.world_builder or not self.scene_npcs:
+            self._turn_count += 1
+            return None
+
+        self._turn_count += 1
+        should_trigger = False
+        reason = ""
+
+        # 条件1: 每 3 轮自动触发
+        if self._turn_count % 3 == 0:
+            should_trigger = True
+            reason = "时间流逝"
+
+        # 条件2: 场景时间变化（由 GM Agent 的工具调用自动更新 self._time_of_day）
+        current_scene = f"{self._time_of_day}_{self._weather}"
+        if self._last_scene_context and self._last_scene_context != current_scene:
+            should_trigger = True
+            reason = f"时间变为{self._time_of_day}"
+        self._last_scene_context = current_scene
+
+        if not should_trigger:
+            return None
+
+        # 顺序模拟 NPC 自主行动
+        actions = []
+        for npc_name in self.scene_npcs[:3]:
+            action = self.world_builder.simulate_npc_actions(
+                npc_name=npc_name,
+                scene_context=self.world.get("description", ""),
+                time_of_day=self._time_of_day,
+                weather=self._weather,
+                other_npc_actions=actions,
+            )
+            if action:
+                actions.append(action)
+
+        if not actions:
+            return None
+
+        # 让 GM Agent 用自然的叙述方式包装这些行动
+        scene_text = ", ".join(self.scene_npcs)
+        actions_text = "\n".join(actions)
+
+        system = (
+            "以下 NPC 刚才在当前场景中自主行动了。请用 1-2 句话自然地叙述这些事件。\n"
+            "用第二人称描述玩家看到/听到/感知到的变化。\n"
+            "不超过 80 字。\n"
+            "以 JSON 格式返回：\n"
+            '{\n'
+            '  "narration": "世界事件叙述",\n'
+            '  "world_event": true\n'
+            '}'
+        )
+
+        messages = [{
+            "role": "user",
+            "content": (
+                f"当前场景NPC：{scene_text}\n"
+                f"触发原因：{reason}\n"
+                f"NPC 行动：\n{actions_text}\n\n"
+                "请将此自然地叙述给玩家。"
+            ),
+        }]
+
+        try:
+            result = self.llm.chat_json(system=system, messages=messages)
+            narration = result.get("narration", actions_text)
+            return f"\n{self._time_of_day}——{narration}"
+        except Exception:
+            return "与此同时——\n" + "\n".join(actions)
 
     def _fallback_response(self, user_input: str) -> str:
         """Generate a simple response when LLM is unavailable."""
@@ -1696,6 +1970,8 @@ class GameMaster:
             "scene_npcs": self.scene_npcs,
             "recent_events": list(self._recent_events),
             "last_gm_response": self._last_gm_response,
+            "turn_count": self._turn_count,
+            "last_scene_context": self._last_scene_context,
             "updated_at": datetime.datetime.now().isoformat(),
         }
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
@@ -1715,6 +1991,8 @@ class GameMaster:
         self.scene_npcs = data.get("scene_npcs", [])
         self._recent_events = deque(data.get("recent_events", []), maxlen=10)
         self._last_gm_response = data.get("last_gm_response", "")
+        self._turn_count = data.get("turn_count", 0)
+        self._last_scene_context = data.get("last_scene_context", "")
 
         ps = data.get("player_state", {})
         if ps:
