@@ -1,0 +1,95 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: #655a4e #2a2420;
+  }
+  
+  *::-webkit-scrollbar {
+    width: 6px;
+  }
+  
+  *::-webkit-scrollbar-track {
+    background: #2a2420;
+  }
+  
+  *::-webkit-scrollbar-thumb {
+    background-color: #655a4e;
+    border-radius: 3px;
+  }
+  
+  body {
+    @apply bg-coal-950 text-coal-100 antialiased;
+    font-family: 'Georgia', 'Times New Roman', serif;
+  }
+}
+
+@layer components {
+  .decorative-border {
+    @apply border border-brass-700/50 rounded;
+    box-shadow: inset 0 0 20px rgba(196, 135, 34, 0.05);
+  }
+  
+  .parchment-bg {
+    background: linear-gradient(135deg, #2a2420 0%, #3d3630 50%, #2a2420 100%);
+  }
+  
+  .glow-text {
+    text-shadow: 0 0 10px rgba(196, 135, 34, 0.3);
+  }
+  
+  .modal-overlay {
+    @apply fixed inset-0 bg-black/70 backdrop-blur-sm z-50;
+  }
+  
+  .modal-content {
+    @apply bg-coal-900 border border-brass-700/50 rounded-lg shadow-2xl;
+    box-shadow: 0 0 40px rgba(196, 135, 34, 0.1);
+  }
+  
+  .btn-primary {
+    @apply px-4 py-2 bg-brass-700 hover:bg-brass-600 text-coal-50 rounded 
+           transition-all duration-200 border border-brass-600
+           hover:shadow-[0_0_15px_rgba(196,135,34,0.3)];
+  }
+  
+  .btn-secondary {
+    @apply px-4 py-2 bg-coal-800 hover:bg-coal-700 text-coal-200 rounded
+           transition-all duration-200 border border-coal-600
+           hover:border-brass-700/50;
+  }
+  
+  .input-field {
+    @apply w-full bg-coal-800 border border-coal-600 rounded px-3 py-2
+           text-coal-100 placeholder-coal-400
+           focus:border-brass-600 focus:outline-none focus:ring-1 focus:ring-brass-600/50
+           transition-all duration-200;
+  }
+  
+  .chat-bubble-gm {
+    @apply bg-coal-800/80 border-l-2 border-brass-600 rounded-r p-4;
+  }
+  
+  .chat-bubble-player {
+    @apply bg-coal-700/50 border-r-2 border-blood-700 rounded-l p-3 ml-8;
+  }
+}
+
+@layer utilities {
+  .text-glow {
+    text-shadow: 0 0 8px rgba(196, 135, 34, 0.4);
+  }
+  
+  .animate-typing-cursor::after {
+    content: '▋';
+    animation: blink 1s step-end infinite;
+  }
+  
+  @keyframes blink {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0; }
+  }
+}

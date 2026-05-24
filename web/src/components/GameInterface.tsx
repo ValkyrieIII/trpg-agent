@@ -1,0 +1,261 @@
+import { useState, useRef, useEffect } from 'react'
+import { useGameStore, Message } from '../store/gameStore'
+import StatePanel from './StatePanel'
+import ModalNPC from './ModalNPC'
+import ModalKnowledge from './ModalKnowledge'
+import ModalSettings from './ModalSettings'
+
+type ModalType = 'npc' | 'knowledge' | 'settings' | null
+
+export default function GameInterface() {
+  const { messages, addMessage, suggestions, setSuggestions, playerState, setPlayerState, npcs, setNpcs, knowledge, setKnowledge, isLoading, setIsLoading, error, setError, streamingText, isStreaming, startStreaming, appendStreaming, stopStreaming } = useGameStore()
+  const [inputValue, setInputValue] = useState('')
+  const [activeModal, setActiveModal] = useState<ModalType>(null)
+  const messagesEndRef = useRef<HTMLDivElement>(null)
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  // Auto-scroll to bottom
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [messages, streamingText])
+
+  // Fetch player state on mount
+  useEffect(() => {
+    fetch('/api/status')
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.state) setPlayerState(data.state)
+        if (data.npcs) setNpcs(data.npcs)
+      })
+      .catch(() => {})
+  }, [])
+
+  const sendAction = async (action: string) => {
+    if (!action.trim() || isLoading) return
+
+    addMessage('player', action)
+    setInputValue('')
+    setIsLoading(true)
+    setError(null)
+    startStreaming()
+
+    try {
+      const res = await fetch('/api/action', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action }),
+      })
+
+      if (!res.ok) {
+        const errText = await res.text()
+        throw new Error(`请求失败 (${res.status}): ${errText}`)
+      }
+
+      const reader = res.body?.getReader()
+      const decoder = new TextDecoder()
+      let fullText = ''
+      let finalData: any = null
+
+      if (reader) {
+        let buffer = ''
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+
+          buffer += decoder.decode(value, { stream: true })
+          const lines = buffer.split('\n')
+          buffer = lines.pop() || ''
+
+          for (const line of lines) {
+            const trimmed = line.trim()
+            if (!trimmed || !trimmed.startsWith('data: ')) continue
+
+            const data = trimmed.slice(6)
+            if (data === '[DONE]') continue
+
+            try {
+              const parsed = JSON.parse(data)
+              if (parsed.done) {
+                finalData = parsed
+              } else if (parsed.text) {
+                fullText += parsed.text
+                appendStreaming(parsed.text)
+              }
+            } catch {
+              // Raw text chunk
+              fullText += data
+              appendStreaming(data)
+            }
+          }
+        }
+      }
+
+      stopStreaming()
+
+      // 使用流式累积的文本作为GM消息，不重复添加
+      if (fullText) {
+        addMessage('gm', fullText)
+      }
+
+      // 更新建议
+      if (finalData?.suggestions?.length > 0) {
+        setSuggestions(finalData.suggestions)
+      } else if (fullText) {
+        const matches = fullText.match(/^\d+\.\s+(.+)$/gm)
+        if (matches) {
+          setSuggestions(matches.map(m => m.replace(/^\d+\.\s+/, '')))
+        } else {
+          setSuggestions([])
+        }
+      }
+
+      // Update player state
+      if (finalData?.state) {
+        setPlayerState(finalData.state)
+      }
+
+      // Update NPCs
+      if (finalData?.npcs) {
+        setNpcs(finalData.npcs)
+      }
+    } catch (err) {
+      stopStreaming()
+      setError(err instanceof Error ? err.message : '未知错误')
+    } finally {
+      setIsLoading(false)
+    }
+  }
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault()
+    sendAction(inputValue)
+  }
+
+  return (
+    <div className="h-screen flex flex-col bg-coal-950">
+      {/* Top bar */}
+      <header className="flex items-center justify-between px-6 py-3 border-b border-coal-700 bg-coal-900/80 backdrop-blur">
+        <h1 className="text-xl font-serif text-brass-400 glow-text">TRPG Agent</h1>
+        <div className="flex gap-2">
+          <button onClick={() => setActiveModal('npc')} className="btn-secondary text-sm">
+            NPC
+          </button>
+          <button onClick={() => setActiveModal('knowledge')} className="btn-secondary text-sm">
+            世界观
+          </button>
+          <button onClick={() => setActiveModal('settings')} className="btn-secondary text-sm">
+            设置
+          </button>
+        </div>
+      </header>
+
+      {/* Main content */}
+      <div className="flex-1 flex overflow-hidden">
+        {/* Chat area */}
+        <div className="flex-1 flex flex-col">
+          {/* Messages */}
+          <div className="flex-1 overflow-y-auto p-6 space-y-4">
+            {messages.map((msg) => (
+              <MessageBubble key={msg.id} message={msg} />
+            ))}
+            {isStreaming && streamingText && (
+              <div className="chat-bubble-gm animate-fade-in">
+                <p className="whitespace-pre-wrap">{streamingText}</p>
+                <span className="animate-typing-cursor text-brass-400" />
+              </div>
+            )}
+            {isLoading && !streamingText && (
+              <div className="flex items-center gap-2 text-coal-400 animate-pulse">
+                <span className="text-brass-400">GM</span>
+                <span>正在思考...</span>
+              </div>
+            )}
+            {error && (
+              <div className="p-4 bg-blood-900/30 border border-blood-700/50 rounded text-blood-300">
+                {error}
+              </div>
+            )}
+            <div ref={messagesEndRef} />
+          </div>
+
+          {/* Suggestions */}
+          {suggestions.length > 0 && (
+            <div className="px-6 pb-3">
+              <div className="decorative-border p-3">
+                <p className="text-xs text-coal-400 mb-2">建议行动</p>
+                <div className="flex flex-wrap gap-2">
+                  {suggestions.map((s, i) => (
+                    <button
+                      key={i}
+                      onClick={() => sendAction(s)}
+                      className="px-3 py-1.5 bg-coal-800 hover:bg-coal-700 border border-coal-600 hover:border-brass-600 rounded text-sm text-coal-200 transition-all duration-200"
+                    >
+                      {s.replace(/^\d+\.\s*/, '')}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Input */}
+          <form onSubmit={handleSubmit} className="p-4 border-t border-coal-700 bg-coal-900/50">
+            <div className="flex gap-3">
+              <input
+                ref={inputRef}
+                type="text"
+                value={inputValue}
+                onChange={(e) => setInputValue(e.target.value)}
+                placeholder="描述你的行动..."
+                className="input-field flex-1"
+                disabled={isLoading}
+                autoFocus
+              />
+              <button
+                type="submit"
+                disabled={isLoading || !inputValue.trim()}
+                className="btn-primary disabled:opacity-50"
+              >
+                发送
+              </button>
+            </div>
+          </form>
+        </div>
+
+        {/* State panel */}
+        {playerState && (
+          <div className="w-72 border-l border-coal-700 bg-coal-900/50 overflow-y-auto p-4">
+            <StatePanel playerState={playerState} npcs={npcs} />
+          </div>
+        )}
+      </div>
+
+      {/* Modals */}
+      {activeModal === 'npc' && (
+        <ModalNPC onClose={() => setActiveModal(null)} />
+      )}
+      {activeModal === 'knowledge' && (
+        <ModalKnowledge onClose={() => setActiveModal(null)} />
+      )}
+      {activeModal === 'settings' && (
+        <ModalSettings onClose={() => setActiveModal(null)} />
+      )}
+    </div>
+  )
+}
+
+function MessageBubble({ message }: { message: Message }) {
+  if (message.role === 'player') {
+    return (
+      <div className="chat-bubble-player animate-slide-up">
+        <p className="whitespace-pre-wrap text-coal-200">{message.content}</p>
+      </div>
+    )
+  }
+
+  return (
+    <div className="chat-bubble-gm animate-fade-in">
+      <p className="whitespace-pre-wrap text-coal-100 leading-relaxed">{message.content}</p>
+    </div>
+  )
+}
