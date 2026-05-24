@@ -8,6 +8,7 @@ Phase 2: invoke_npc routes to real NPC Agents with autonomous decision-making.
 import os
 import glob
 import re
+import time
 
 from agents import RunContextWrapper, function_tool, Runner
 
@@ -211,6 +212,7 @@ def create_npc(
         game_ctx.scene_npcs.append(name)
 
     # ---- Phase 2: create NPC Agent for autonomous decision-making ----
+    agent_created = False
     if name not in game_ctx.npc_agents:
         try:
             from trpg_agent.npc_agent import create_npc_agent
@@ -222,8 +224,13 @@ def create_npc(
                     personality_prompt=npc_char.build_personality_prompt(),
                     npc_store=game_ctx.npc_store,
                 )
+                agent_created = True
         except Exception:
             pass  # NPC Agent creation is best-effort; fall back to legacy path
+
+    if game_ctx.debug:
+        tag = "+Agent" if agent_created else ("已有" if name in game_ctx.npc_agents else "无Agent")
+        game_ctx.debug_log.append(f"[工具] create_npc: {name} ({personality_tone}) {tag}")
 
     core_summary = "；".join(core_lines[:2])
     return f"已创建 NPC「{name}」: {core_summary}（语调: {personality_tone}）"
@@ -334,6 +341,9 @@ def combat_attack(ctx: RunContextWrapper[GameContext], target: str) -> str:
     npc_state.apply("threatened")
     game_ctx.npc_store.save_state(target)
 
+    if game_ctx.debug:
+        game_ctx.debug_log.append(f"[工具] combat_attack: {target} | d20={roll_val} | {'命中' if attack_result['success'] else '落空'}")
+
     return result
 
 
@@ -354,13 +364,45 @@ def search_knowledge(ctx: RunContextWrapper[GameContext], query: str) -> str:
 
 @function_tool
 def search_memory(ctx: RunContextWrapper[GameContext], query: str) -> str:
-    """Search adventure memory (past events, NPC interactions, etc.)."""
+    """Search adventure memory (past events, NPC interactions, etc.).
+
+    Checks recent_events first (fast, in-memory), then falls back to
+    ChromaDB full_retrieve (semantic + graph traversal).
+    """
     if not query:
         return "错误: 未指定搜索查询"
-    memories = ctx.context.memory.search(query, n=5)
-    if not memories:
+
+    game_ctx = ctx.context
+    lines: list[str] = []
+    seen: set[str] = set()
+
+    # 1. Fast path: recent_events in-memory match
+    if game_ctx.recent_events:
+        query_lower = query.lower()
+        for event in game_ctx.recent_events:
+            if len(lines) >= 3:
+                break
+            # Simple substring match — fast, no embedding cost
+            if any(word in event for word in query_lower.split() if len(word) >= 2):
+                if event[:20] not in seen:
+                    lines.append(f"- {event}")
+                    seen.add(event[:20])
+
+    # 2. Deep path: ChromaDB semantic + graph
+    memories = game_ctx.memory.full_retrieve(query)
+    for m in memories:
+        if len(lines) >= 6:
+            break
+        if m.get("type", "") == "npc_dialogue":
+            continue
+        content = m["content"]
+        if content[:20] not in seen:
+            lines.append(f"- {content}")
+            seen.add(content[:20])
+
+    if not lines:
         return f"未找到与「{query}」相关的记忆"
-    return "\n".join(f"- {m['content']}" for m in memories[:5])
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -410,7 +452,7 @@ def game_over(ctx: RunContextWrapper[GameContext], cause: str) -> str:
 # ---------------------------------------------------------------------------
 
 @function_tool
-def invoke_npc(ctx: RunContextWrapper[GameContext], name: str, prompt: str) -> str:
+async def invoke_npc(ctx: RunContextWrapper[GameContext], name: str, prompt: str) -> str:
     """Have a specific NPC respond in-character.
 
     The NPC will reply based on their personality, current state,
@@ -443,22 +485,32 @@ def invoke_npc(ctx: RunContextWrapper[GameContext], name: str, prompt: str) -> s
         else {"emotion": "calm", "trust": 0.5, "stamina": "fresh"}
     )
 
-    # ---- Phase 2: try NPC Agent first ----
+    # ---- Phase 2: try NPC Agent first (async) ----
     npc_agent = game_ctx.npc_agents.get(name)
+    agent_path: str = "legacy"
     if npc_agent is not None:
         try:
-            npc_reply = _invoke_npc_agent(
+            npc_reply = await _invoke_npc_agent_async(
                 game_ctx, npc_agent, name, prompt, npc_state_dict
             )
+            agent_path = "agent"
         except Exception:
             # Fall back to legacy path on Agent failure
             npc_reply = _invoke_npc_legacy(
                 game_ctx, npc, name, prompt, npc_state_dict
             )
+            agent_path = "legacy(fallback)"
     else:
         # Phase 1 fallback: no NPC Agent created yet
         npc_reply = _invoke_npc_legacy(
             game_ctx, npc, name, prompt, npc_state_dict
+        )
+
+    if game_ctx.debug:
+        state_tag = f"情绪:{npc_state_dict.get('emotion','?')}"
+        game_ctx.debug_log.append(
+            f"[NPC] {name}  |  {agent_path}  |  {state_tag}  |  "
+            f"prompt {len(prompt)}字 → 回复 {len(npc_reply)}字"
         )
 
     # Record in NPC history
@@ -477,15 +529,14 @@ def invoke_npc(ctx: RunContextWrapper[GameContext], name: str, prompt: str) -> s
 # invoke_npc helpers (Phase 1 + 2)
 # ---------------------------------------------------------------------------
 
-def _invoke_npc_agent(
+async def _invoke_npc_agent_async(
     game_ctx: GameContext,
     npc_agent,
     name: str,
     prompt: str,
     npc_state_dict: dict,
 ) -> str:
-    """Phase 2: route to NPC Agent for autonomous decision-making."""
-    import asyncio
+    """Phase 2: route to NPC Agent for autonomous decision-making (async)."""
     from trpg_agent.npc_agent import build_npc_input
 
     # Build NPC-specific context
@@ -509,8 +560,8 @@ def _invoke_npc_agent(
     npc_history = list(game_ctx.npc_store.get_history(name))
     npc_input = build_npc_input(prompt, npc_context, npc_history)
 
-    # Run NPC Agent (use sync wrapper since we're inside a sync tool)
-    result = Runner.run_sync(
+    # Run NPC Agent within the existing event loop (no nested run_sync)
+    result = await Runner.run(
         npc_agent,
         input=npc_input,
         context=npc_context,

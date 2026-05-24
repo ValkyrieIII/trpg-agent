@@ -8,7 +8,7 @@ import ModalSettings from './ModalSettings'
 type ModalType = 'npc' | 'knowledge' | 'settings' | null
 
 export default function GameInterface() {
-  const { messages, addMessage, suggestions, setSuggestions, playerState, setPlayerState, npcs, setNpcs, knowledge, setKnowledge, isLoading, setIsLoading, error, setError, streamingText, isStreaming, startStreaming, appendStreaming, stopStreaming } = useGameStore()
+  const { messages, addMessage, suggestions, setSuggestions, playerState, setPlayerState, npcs, setNpcs, knowledge, setKnowledge, isLoading, setIsLoading, error, setError, streamingText, isStreaming, startStreaming, appendStreaming, stopStreaming, agentStatus, setAgentStatus, currentTool, setCurrentTool } = useGameStore()
   const [inputValue, setInputValue] = useState('')
   const [activeModal, setActiveModal] = useState<ModalType>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
@@ -77,6 +77,18 @@ export default function GameInterface() {
               const parsed = JSON.parse(data)
               if (parsed.done) {
                 finalData = parsed
+              } else if (parsed.type) {
+                // Status event from Agent
+                if (parsed.type === 'thinking_start') {
+                  setAgentStatus('thinking')
+                } else if (parsed.type === 'thinking_end') {
+                  setAgentStatus('idle')
+                } else if (parsed.type === 'tool_call_start') {
+                  setAgentStatus('tool_calling')
+                  setCurrentTool({ tool: parsed.tool, display: parsed.display, result: null })
+                } else if (parsed.type === 'tool_call_end') {
+                  setAgentStatus('idle')
+                }
               } else if (parsed.text) {
                 fullText += parsed.text
                 appendStreaming(parsed.text)
@@ -92,21 +104,14 @@ export default function GameInterface() {
 
       stopStreaming()
 
-      // 使用流式累积的文本作为GM消息，不重复添加
+      // GM 消息 — narration 已由后端从 JSON 中提取，不含建议行
       if (fullText) {
         addMessage('gm', fullText)
       }
 
-      // 更新建议
+      // 更新建议 — 由后端 JSON suggestions 字段提供
       if (finalData?.suggestions?.length > 0) {
         setSuggestions(finalData.suggestions)
-      } else if (fullText) {
-        const matches = fullText.match(/^\d+\.\s+(.+)$/gm)
-        if (matches) {
-          setSuggestions(matches.map(m => m.replace(/^\d+\.\s+/, '')))
-        } else {
-          setSuggestions([])
-        }
       }
 
       // Update player state
@@ -123,6 +128,8 @@ export default function GameInterface() {
       setError(err instanceof Error ? err.message : '未知错误')
     } finally {
       setIsLoading(false)
+      setAgentStatus('idle')
+      setCurrentTool(null)
     }
   }
 
@@ -164,9 +171,21 @@ export default function GameInterface() {
                 <span className="animate-typing-cursor text-brass-400" />
               </div>
             )}
-            {isLoading && !streamingText && (
+            {isLoading && !streamingText && agentStatus === 'thinking' && (
+              <div className="flex items-center gap-2 text-coal-400">
+                <span className="text-brass-400 font-serif">GM</span>
+                <span className="thinking-dots">正在思考</span>
+              </div>
+            )}
+            {isLoading && agentStatus === 'tool_calling' && currentTool && (
+              <div className="flex items-center gap-2 text-brass-500 font-mono text-sm animate-fade-in">
+                <span className="w-2 h-2 rounded-full bg-brass-500 animate-pulse" />
+                <span>调用 {currentTool.display}</span>
+              </div>
+            )}
+            {isLoading && !streamingText && agentStatus === 'idle' && (
               <div className="flex items-center gap-2 text-coal-400 animate-pulse">
-                <span className="text-brass-400">GM</span>
+                <span className="text-brass-400 font-serif">GM</span>
                 <span>正在思考...</span>
               </div>
             )}

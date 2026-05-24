@@ -62,14 +62,9 @@ export default function StartScreen() {
         addMessage('gm', data.opening)
       }
 
-      // 提取并设置建议
+      // 建议由后端 JSON suggestions 字段提供
       if (data.suggestions?.length > 0) {
         setSuggestions(data.suggestions)
-      } else if (data.opening) {
-        const matches = data.opening.match(/^\d+\.\s+(.+)$/gm)
-        if (matches) {
-          setSuggestions(matches.map((m: string) => m.replace(/^\d+\.\s+/, '')))
-        }
       }
 
       // 设置玩家状态

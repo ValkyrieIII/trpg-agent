@@ -87,9 +87,21 @@
     content: '▋';
     animation: blink 1s step-end infinite;
   }
-  
+
+  .thinking-dots::after {
+    content: '';
+    animation: dotPulse 1.5s steps(1, end) infinite;
+  }
+
   @keyframes blink {
     0%, 100% { opacity: 1; }
     50% { opacity: 0; }
+  }
+
+  @keyframes dotPulse {
+    0%   { content: ''; }
+    25%  { content: '.'; }
+    50%  { content: '..'; }
+    75%  { content: '...'; }
   }
 }

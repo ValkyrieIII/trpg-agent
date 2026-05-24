@@ -25,6 +25,7 @@ from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from trpg_agent.game_master import GameMaster
+from trpg_agent.event_stream import StatusEvent
 
 # ------------------------------------------------------------------
 #  App
@@ -92,7 +93,7 @@ async def api_start(body: dict = {}):
         )
         return {
             "opening": opening,
-            "suggestions": _extract_suggestions(opening),
+            "suggestions": gm._last_suggestions or _extract_suggestions(opening),
             "state": gm.player_state.to_dict(),
             "npcs": _get_scene_npcs(gm),
         }
@@ -215,27 +216,31 @@ async def api_debug_toggle():
 
 @app.post("/api/action")
 async def api_action(body: dict):
-    """发送玩家行动，SSE 流式返回 GM 响应。"""
+    """发送玩家行动，SSE 真流式返回 GM 响应。"""
     action = body.get("action", "")
 
     async def event_stream() -> AsyncGenerator[str, None]:
         gm = _get_gm()
 
-        # 调用 process 获取结果
-        result = gm.process(action)
+        async for chunk in gm.process_streaming(action):
+            if isinstance(chunk, StatusEvent):
+                data = json.dumps({
+                    'type': chunk.type,
+                    'tool': chunk.tool,
+                    'display': chunk.display,
+                    'result': chunk.result,
+                }, ensure_ascii=False)
+            elif chunk:
+                data = json.dumps({'text': chunk}, ensure_ascii=False)
+            else:
+                continue
+            yield f"data: {data}\n\n"
 
-        # Send narration in chunks for streaming effect
-        if result:
-            sentences = _split_sentences(result)
-            for sentence in sentences:
-                chunk = json.dumps({'text': sentence}, ensure_ascii=False)
-                yield f"data: {chunk}\n\n"
-                await asyncio.sleep(0.05)
-
-        # Send final data — no narration field to avoid duplication on frontend
+        # After streaming: send final state from GameMaster
+        response = gm._last_gm_response or ""
         final = {
             "done": True,
-            "suggestions": _extract_suggestions(result),
+            "suggestions": gm._last_suggestions or _extract_suggestions(response),
             "state": gm.player_state.to_dict(),
             "npcs": _get_scene_npcs(gm),
         }

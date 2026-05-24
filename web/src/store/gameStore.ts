@@ -31,6 +31,14 @@ export interface KnowledgeEntry {
   known_by: string
 }
 
+export type AgentStatus = 'idle' | 'thinking' | 'tool_calling'
+
+export interface ToolCallInfo {
+  tool: string
+  display: string
+  result: string | null
+}
+
 interface GameState {
   // Messages
   messages: Message[]
@@ -43,6 +51,12 @@ interface GameState {
   startStreaming: () => void
   appendStreaming: (text: string) => void
   stopStreaming: () => void
+
+  // Agent status (thinking / tool calling)
+  agentStatus: AgentStatus
+  currentTool: ToolCallInfo | null
+  setAgentStatus: (status: AgentStatus) => void
+  setCurrentTool: (tool: ToolCallInfo | null) => void
 
   // Suggestions
   suggestions: string[]
@@ -124,6 +138,11 @@ export const useGameStore = create<GameState>((set) => ({
 
   error: null,
   setError: (error) => set({ error }),
+
+  agentStatus: 'idle',
+  currentTool: null,
+  setAgentStatus: (agentStatus) => set({ agentStatus }),
+  setCurrentTool: (currentTool) => set({ currentTool }),
 
   worldSimulationEnabled: true,
   setWorldSimulationEnabled: (worldSimulationEnabled) => set({ worldSimulationEnabled }),

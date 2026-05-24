@@ -15,17 +15,20 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
 import time
 from collections import deque
+from collections.abc import AsyncGenerator
 from typing import Any, Dict, List, Optional
 
 import yaml
 
 from agents import Runner
 
+from trpg_agent.event_stream import StatusEvent, make_tool_event, AgentStatusHooks
 from trpg_agent.agent_config import (
     GameContext,
     configure_deepseek,
@@ -337,14 +340,15 @@ class GameMaster:
         self._recent_events: deque = deque(maxlen=10)
 
         # -- World state tracking (set by opening/LGM; defaults for empty state) --
-        self._time_of_day: str = "未知"
-        self._weather: str = "未知"
+        self._time_of_day: str = "清晨"
+        self._weather: str = "薄雾"
 
         # -- Game over flag --
         self._game_over: bool = False
 
         # -- Previous turn response (for suggestion continuity) --
         self._last_gm_response: str = ""
+        self._last_suggestions: list[str] = []
 
         # -- World simulation counters (auto NPC actions) --
         self._turn_count: int = 0
@@ -386,6 +390,13 @@ class GameMaster:
             ])
         else:
             self.gm_agent = None
+
+        # -- Tool Advisor (zero-tools agent for tool suggestion) --
+        if self._llm_available:
+            from trpg_agent.agent_config import create_tool_advisor
+            self.tool_advisor = create_tool_advisor()
+        else:
+            self.tool_advisor = None
 
         # -- Sync NPC Agents for any NPCs already in the store (backstory, etc.) --
         if self._llm_available:
@@ -1047,94 +1058,83 @@ class GameMaster:
     #  Context builder & response renderer
     # ------------------------------------------------------------------
 
+    def _run_tool_advisor(self, user_input: str) -> str:
+        """Query the Tool Advisor for tool suggestions (completely isolated, no tools)."""
+        if self.tool_advisor is None:
+            return ""
+        try:
+            advisor_input = (
+                f"场景: {self._time_of_day} {self._weather} | "
+                f"NPC: {', '.join(self.scene_npcs) if self.scene_npcs else '无'}\n"
+                f"玩家: {user_input}"
+            )
+            result = Runner.run_sync(
+                self.tool_advisor,
+                input=advisor_input,
+                max_turns=1,
+            )
+            return result.final_output.strip()
+        except Exception as e:
+            self._debug(f"[Advisor] 调用失败: {e}")
+            return ""
+
+    async def _run_tool_advisor_async(self, user_input: str) -> str:
+        """Async version — for use inside process_streaming() where event loop is running."""
+        if self.tool_advisor is None:
+            return ""
+        try:
+            state = self.player_state.get_state()
+            advisor_input = (
+                f"场景: {self._time_of_day} {self._weather} | "
+                f"NPC: {', '.join(self.scene_npcs) if self.scene_npcs else '无'}\n"
+                f"玩家状态: HP {state['hp']}/{state['max_hp']}  情绪 {state['emotion']}  "
+                f"信任 {state['trust']}  体力 {state['stamina']}\n"
+                f"角色卡:\n{self.player.summary()}\n\n"
+                f"玩家: {user_input}"
+            )
+            result = await Runner.run(
+                self.tool_advisor,
+                input=advisor_input,
+                max_turns=1,
+            )
+            return result.final_output.strip()
+        except Exception as e:
+            self._debug(f"[Advisor] 调用失败: {e}")
+            return ""
+
     def _build_input(self, user_input: str) -> str:
-        """Build the input text for the GM Agent, including memory + knowledge + context.
+        """Build a compact input text for the GM Agent.
 
-        Returns a single string to pass as Runner.run_sync() input.
+        Memory retrieval is NOT done here — the GM calls `search_memory` as a tool
+        when it actually needs to recall past events.  This keeps the context window
+        lean and avoids injecting the same old memories every turn.
         """
-        # -- Enriched search query --
-        enriched_query = ""
-        if self._llm_available and self.llm:
-            context = ""
-            if self.scene_npcs:
-                context = "当前场景NPC：" + ", ".join(self.scene_npcs)
-            enriched_query = self.llm.generate_search_query(user_input, context)
+        parts: list[str] = []
 
-        if not enriched_query:
-            enriched_query = user_input
-            if self.scene_npcs:
-                enriched_query += " " + " ".join(self.scene_npcs[:3])
-
-        # Questions about past events: skip recent bias
-        is_retrospective = any(
-            kw in user_input
-            for kw in ["之前", "发生了", "还记得", "上次", "过去", "以前", "那天"]
-        )
-        if self._recent_events and not is_retrospective:
-            enriched_query += " " + " ".join(list(self._recent_events)[-1:])
-
-        # -- Memory retrieval --
-        memories = self.memory.full_retrieve(enriched_query)
-        memories = [m for m in memories if m.get("type", "") != "npc_dialogue"]
-
-        memory_lines: list = []
-        seen_prefixes: set = set()
-        for m in memories[:5]:
-            content = m["content"]
-            rel = m.get("relation", "")
-            if rel:
-                memory_lines.append(f"- {content} （{rel}）")
-            else:
-                memory_lines.append(f"- {content}")
-            seen_prefixes.add(content[:20])
-
-        if self._recent_events:
-            for text in list(self._recent_events)[-5:]:
-                if text and text[:20] not in seen_prefixes:
-                    memory_lines.append(f"- {text}")
-                    seen_prefixes.add(text[:20])
-                    if len(memory_lines) >= 8:
-                        break
-
-        memory_text = (
-            "## 记忆\n" + "\n".join(memory_lines) if memory_lines else ""
+        # -- Current state summary (lightweight, always relevant) --
+        state = self.player_state.get_state()
+        npc_text = ", ".join(self.scene_npcs) if self.scene_npcs else "无"
+        parts.append(
+            f"## 当前状态\n"
+            f"时间: {self._time_of_day}  天气: {self._weather}  |  场景NPC: {npc_text}\n"
+            f"HP {state['hp']}/{state['max_hp']}  情绪 {state['emotion']}  "
+            f"信任 {state['trust']}  体力 {state['stamina']}"
         )
 
-        if self.debug:
-            lines = [
-                f"[DEBUG] 记忆检索(query='{enriched_query[:60]}...'): "
-                f"{len(memories)}条 (合并后{len(memory_lines)}条)"
-            ]
-            for line in memory_lines[:3]:
-                lines.append(f"  {line[:80]}")
-            self._debug("\n".join(lines))
+        # -- Recent history (last 3 exchanges, for multi-turn continuity) --
+        history_text = self._format_history()
+        if history_text:
+            parts.append(history_text)
 
-        # -- Knowledge retrieval --
-        knowledge = self.knowledge.query(user_input, self.player.name)
-        knowledge_text = ""
-        if knowledge:
-            knowledge_text = "## 世界知识\n" + "\n".join(
-                f"- {k}" for k in knowledge[:3]
-            )
-        self._debug(f"[DEBUG] 知识检索: {len(knowledge)}条")
-
-        # -- Assemble input --
-        parts = []
-        if memory_text:
-            parts.append(memory_text)
-        if knowledge_text:
-            parts.append(knowledge_text)
-
-        # Previous turn context (for suggestion continuity)
+        # -- Previous turn (suggestion continuity) --
         if self._last_gm_response:
-            parts.append(
-                f"## 上一轮 GM 回应\n{self._last_gm_response}"
-            )
+            parts.append(f"## 上一轮 GM 回应\n{self._last_gm_response}")
 
-        # Player input
+        # -- Player input --
         parts.append(f"玩家: {user_input}")
         parts.append(
-            "请在叙述结束时列出3个建议行动选项：\n1. 建议一\n2. 建议二\n3. 建议三"
+            "输出格式（严格JSON，不要输出其他内容）：\n"
+            '{"narration": "场景叙述（不超过150字）", "suggestions": ["建议1", "建议2", "建议3"]}'
         )
 
         return "\n\n".join(parts)
@@ -1154,9 +1154,12 @@ class GameMaster:
             player_skills=self.player.skills,
             player_attributes=self.player.attributes,
             npc_agents=self._npc_agents,
-            history_messages=self.history_messages,
+            history_messages=[],  # don't pass — SDK may leak stale tool_calls to DeepSeek
             llm=self.llm,
             game_over=self._game_over,
+            debug=self.debug,
+            debug_log=[],
+            recent_events=list(self._recent_events),
         )
 
     def _format_history(self) -> str:
@@ -1362,20 +1365,16 @@ class GameMaster:
                     parts.append(f"{i}. {cleaned}")
         return "\n\n".join(parts)
 
+    # Tools whose results are shown as visible check lines
+    _CHECK_TOOLS = {"roll_dice", "difficulty_check", "skill_check", "combat_attack"}
+
     @staticmethod
     def _format_check_result(tool_name: str, result: str) -> str | None:
         """Extract a player-visible check line from a tool result.
 
         Returns None for tools that don't produce visible checks (e.g. npc_speak, search).
         """
-        # Tools whose results are shown as check calculations
-        _CHECK_TOOLS = {
-            "roll_dice",
-            "difficulty_check",
-            "skill_check",
-            "combat_attack",
-        }
-        if tool_name not in _CHECK_TOOLS:
+        if tool_name not in GameMaster._CHECK_TOOLS:
             return None
 
         # Return the result string directly — it's already a concise check description
@@ -1412,21 +1411,25 @@ class GameMaster:
             if world_result:
                 return self._narrate_world_builder_result(world_result, user_input)
 
-        self._debug(f"\n{'─'*50}\n[DEBUG] 玩家输入: {user_input}")
-
-        # ---- Fallback: LLM not available ----
-        if not self._llm_available or not self.llm or self.gm_agent is None:
-            response = self._fallback_response(user_input)
-            self._debug("[DEBUG] LLM 不可用，使用 fallback")
-            return response
-
         # ---- Build context ----
+        scene_npcs_text = ", ".join(self.scene_npcs) if self.scene_npcs else "无"
+        self._debug(f"\n{'─'*50}\n[GM] 玩家: {user_input}")
+        self._debug(f"[GM] 场景: {scene_npcs_text}  |  {self._time_of_day}  ·  {self._weather}")
+
         input_text = self._build_input(user_input)
         game_ctx = self._build_game_context()
 
+        # -- Tool Advisor: lightweight suggestion before GM acts --
+        t0_advice = time.time()
+        advice = self._run_tool_advisor(user_input)
+        if self.debug and advice:
+            ms_advice = int((time.time() - t0_advice) * 1000)
+            self._debug(f"[Advisor] {advice}  ({ms_advice}ms)")
+        if advice and advice != "无需工具":
+            input_text = f"【工具建议】考虑调用 {advice}\n\n" + input_text
+
         # Update GM instructions with current world state
         world_setting = self.world.get("description", self.world.get("name", "未知世界"))
-        scene_npcs_text = ", ".join(self.scene_npcs) if self.scene_npcs else "无"
         self.gm_agent.instructions = build_gm_instructions(
             world_setting=world_setting,
             player_name=self.player.name,
@@ -1437,6 +1440,7 @@ class GameMaster:
         )
 
         # ---- SDK Runner: automatic tool-calling loop ----
+        t0 = time.time()
         try:
             result = Runner.run_sync(
                 self.gm_agent,
@@ -1446,8 +1450,17 @@ class GameMaster:
             )
             response = result.final_output
         except Exception as e:
-            self._debug(f"[DEBUG] Runner.run_sync 失败: {e}")
+            self._debug(f"[GM] Runner 失败: {e}")
             return self._fallback_response(user_input)
+
+        elapsed_ms = int((time.time() - t0) * 1000)
+
+        # ---- Debug: aggregate tool-level entries ----
+        if self.debug:
+            self._debug(f"[GM] Runner 完成  |  耗时 {elapsed_ms}ms  |  输出 {len(response)}字符  |  "
+                        f"输入 {len(input_text)}字符(~{len(input_text)//2}tok)")
+            for entry in game_ctx.debug_log:
+                self._debug(entry)
 
         # ---- Update history ----
         self.history_messages.append({"role": "user", "content": user_input})
@@ -1481,14 +1494,175 @@ class GameMaster:
         if self.debug:
             state = self.player_state.get_state()
             self._debug(
-                f"[DEBUG] 当前状态: 情绪={state['emotion']} 信任={state['trust']} "
-                f"体力={state['stamina']}\n"
-                f"[DEBUG] 场景NPC: {self.scene_npcs}\n"
-                f"{'─'*50}"
+                f"[状态] HP {state['hp']}/{state['max_hp']}  |  "
+                f"情绪 {state['emotion']}  |  信任 {state['trust']}  |  "
+                f"体力 {state['stamina']}  |  在场 {self.scene_npcs or '无'}"
             )
 
         self._last_gm_response = response
         return response
+
+    async def process_streaming(self, user_input: str) -> AsyncGenerator["str | StatusEvent", None]:
+        """Async generator — yields text chunks and StatusEvents in real time.
+
+        Yields:
+            str          — narrative text delta for the player
+            StatusEvent  — thinking / tool_call status for the UI
+
+        Caller should read `self._last_gm_response`, `self.player_state`,
+        and `self.scene_npcs` after the generator is exhausted.
+        """
+        user_input = user_input.strip()
+        if not user_input:
+            yield "请说点什么吧。"
+            return
+
+        self._last_user_input = user_input
+
+        # ---- Command routing ----
+        if self.world_builder and user_input.startswith("!"):
+            world_result = self._handle_world_builder_command(user_input)
+            if world_result:
+                response = self._narrate_world_builder_result(world_result, user_input)
+                yield response
+                return
+
+        self._debug(f"\n{'─'*50}\n[GM] 玩家: {user_input}")
+
+        # ---- Fallback ----
+        if not self._llm_available or not self.llm or self.gm_agent is None:
+            response = self._fallback_response(user_input)
+            yield response
+            return
+
+        # ---- Build context ----
+        scene_npcs_text = ", ".join(self.scene_npcs) if self.scene_npcs else "无"
+        self._debug(f"[GM] 场景: {scene_npcs_text}  |  {self._time_of_day}  ·  {self._weather}")
+
+        input_text = self._build_input(user_input)
+        game_ctx = self._build_game_context()
+
+        # -- Tool Advisor --
+        t0_advice = time.time()
+        advice = await self._run_tool_advisor_async(user_input)
+        if self.debug and advice:
+            ms_advice = int((time.time() - t0_advice) * 1000)
+            self._debug(f"[Advisor] {advice}  ({ms_advice}ms)")
+        if advice and advice != "无需工具":
+            input_text = f"【工具建议】考虑调用 {advice}\n\n" + input_text
+
+        # Update GM instructions
+        world_setting = self.world.get("description", self.world.get("name", "未知世界"))
+        self.gm_agent.instructions = build_gm_instructions(
+            world_setting=world_setting,
+            player_name=self.player.name,
+            player_card=self.player.summary(),
+            time_of_day=self._time_of_day,
+            weather=self._weather,
+            scene_npcs=scene_npcs_text,
+        )
+
+        # ---- SDK Runner: async with hooks for status events ----
+        event_queue: asyncio.Queue = asyncio.Queue()
+        hooks = AgentStatusHooks(event_queue)
+
+        full_response = ""
+        t0 = time.time()
+        try:
+            run_task = asyncio.create_task(
+                Runner.run(
+                    self.gm_agent,
+                    input=input_text,
+                    context=game_ctx,
+                    max_turns=10,
+                    hooks=hooks,
+                )
+            )
+
+            # Yield status events from hooks while runner is working
+            while not run_task.done():
+                try:
+                    event = await asyncio.wait_for(event_queue.get(), timeout=0.1)
+                    if isinstance(event, StatusEvent):
+                        yield event
+                except asyncio.TimeoutError:
+                    pass
+
+            # Drain remaining events
+            while not event_queue.empty():
+                event = event_queue.get_nowait()
+                if isinstance(event, StatusEvent):
+                    yield event
+
+            result = run_task.result()
+            full_response = result.final_output
+        except Exception as e:
+            self._debug(f"[GM] Runner 失败: {e}")
+            fallback = self._fallback_response(user_input)
+            full_response = fallback
+            yield fallback
+
+        elapsed_ms = int((time.time() - t0) * 1000)
+
+        # ---- Parse JSON output: narration + suggestions ----
+        self._last_suggestions = []
+        narration = full_response  # fallback: use raw text
+        try:
+            parsed = json.loads(full_response.strip())
+            if isinstance(parsed, dict):
+                narration = parsed.get("narration", full_response)
+                self._last_suggestions = parsed.get("suggestions", [])
+        except (json.JSONDecodeError, TypeError):
+            pass  # non-JSON output, use raw text as narration
+
+        if self.debug:
+            self._debug(f"[GM] Runner 完成  |  耗时 {elapsed_ms}ms  |  "
+                        f"输出 {len(full_response)}字符  |  "
+                        f"输入 {len(input_text)}字符(~{len(input_text)//2}tok)")
+            for entry in game_ctx.debug_log:
+                self._debug(entry)
+
+        # ---- Stream narration to frontend ----
+        if narration:
+            for sentence in _split_sentences(narration):
+                yield sentence
+                await asyncio.sleep(0.03)
+
+        # ---- Post-processing (same as process()) ----
+        self.history_messages.append({"role": "user", "content": user_input})
+        self.history_messages.append({"role": "assistant", "content": full_response})
+        self._trim_history()
+
+        self._time_of_day = game_ctx.time_of_day
+        self._weather = game_ctx.weather
+        self._game_over = game_ctx.game_over
+
+        if not self._game_over and full_response:
+            try:
+                self._write_memory(user_input, full_response, [])
+                for npc_name in game_ctx.scene_npcs:
+                    combined = (
+                        f"以下事件与{npc_name}相关，请从{npc_name}的视角提取记忆:\n"
+                        f"玩家: {user_input}\n事件: {full_response[:300]}"
+                    )
+                    self._write_npc_memory(npc_name, combined)
+            except Exception as e:
+                self._debug(f"[GM] 记忆写入失败: {e}")
+
+        world_action = self._maybe_trigger_world_simulation(user_input)
+        if world_action:
+            yield "\n\n" + world_action
+            full_response += "\n\n" + world_action
+
+        if self.debug:
+            state = self.player_state.get_state()
+            self._debug(
+                f"[状态] HP {state['hp']}/{state['max_hp']}  |  "
+                f"情绪 {state['emotion']}  |  信任 {state['trust']}  |  "
+                f"体力 {state['stamina']}  |  在场 {self.scene_npcs or '无'}"
+            )
+
+        self._last_gm_response = full_response
 
     def _rebuild_response(
         self, user_input: str, tool_results: List[str], involved_npcs: List[str]
@@ -1792,9 +1966,9 @@ class GameMaster:
             for s in similar:
                 if s.get("id") != npc_mem_id:
                     self.memory.link(npc_mem_id, s["id"], "关联到")
-            self._debug(f"[DEBUG] NPC 记忆写入 ({npc_name}): {extracted[:80]}")
+            self._debug(f"[记忆] NPC「{npc_name}」: {extracted[:100]}")
         except Exception as e:
-            self._debug(f"[DEBUG] NPC 记忆写入失败 ({npc_name}): {e}")
+            self._debug(f"[记忆] NPC「{npc_name}」写入失败: {e}")
 
     def _write_memory(
         self, user_input: str, narration: str, tool_results: List[str]
@@ -1832,7 +2006,8 @@ class GameMaster:
                 if prev_results and prev_results[0].get("id") != mem_id:
                     self.memory.link(mem_id, prev_results[0]["id"], "发生在...之后")
 
-            self._debug(f"[DEBUG] 记忆写入: {extracted}")
+            link_count = len(similar)
+            self._debug(f"[记忆] 主: {extracted[:100]}  (链接 {link_count}条)")
 
             return mem_id
         except Exception:
@@ -2016,12 +2191,12 @@ class GameMaster:
                 print(f"[DEBUG] 开局创建 NPC: {[n.get('name') for n in npcs]}")
 
             # Treat opening as first GM output — write memory + set context
-            opening_text = GameMaster._render_accumulated([narration], suggestions)
-            self._last_gm_response = opening_text
+            self._last_suggestions = suggestions
+            self._last_gm_response = narration
             self._recent_events.append(narration)
             self._write_memory("游戏开始", narration, [])
 
-            return opening_text
+            return narration
         except Exception:
             fallback = f"你站在{world_desc}的边缘，冒险即将开始。"
             self._last_gm_response = fallback
@@ -2145,3 +2320,20 @@ class GameMaster:
 # def _update_state_from_keywords(self, text: str) -> List[str]:
 #     """在 *text* 中搜索状态触发关键词并更新状态机。"""
 #     ...
+
+
+def _split_sentences(text: str) -> list[str]:
+    """Split text into sentences for streaming effect."""
+    parts = re.split(r'([。！？；\n]+)', text)
+    sentences = []
+    for i in range(0, len(parts), 2):
+        sentence = parts[i]
+        if i + 1 < len(parts):
+            sentence += parts[i + 1]
+        if sentence.strip():
+            sentences.append(sentence)
+    if len(parts) % 2 == 1 and parts[-1].strip():
+        sentences.append(parts[-1])
+    if not sentences:
+        sentences = [text]
+    return sentences
