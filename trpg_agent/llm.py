@@ -175,3 +175,35 @@ class LLM:
         if not result or not result.strip():
             return ""
         return result.strip()
+
+    def generate_search_query(self, user_input: str, context: str = "") -> str:
+        """分析玩家输入，生成适用于 ChromaDB 语义搜索的查询字符串。
+
+        提取关键实体、事件主题、时间线索，输出简洁的关键词和短语（20-50字）。
+        空响应时返回空字符串，由调用方 fallback。
+        """
+        system = (
+            "你是一个 TRPG 跑团记忆检索助手。分析玩家的输入，提取其中的关键信息，"
+            "生成一个简洁的搜索查询（20-50字），用于在向量数据库中检索相关记忆。\n\n"
+            "规则：\n"
+            "1. 提取关键实体：人名、地名、物品名、组织名\n"
+            "2. 提取事件主题：发生了什么、玩家想做什么\n"
+            "3. 提取时间线索：之前、昨天、上次、过去等\n"
+            "4. 输出格式：只用关键词和短语，不要完整句子，不要叙事\n"
+            "5. 如果玩家输入信息量很少（如只是闲聊、简单询问），直接返回玩家原话\n\n"
+            "示例：\n"
+            "玩家输入：\"你还记得我们之前在码头遇到的那个商人吗？他说有线索\"\n"
+            "输出：码头 商人 线索 之前相遇\n\n"
+            "玩家输入：\"我想去酒馆打听一下附近有没有奇怪的事情发生\"\n"
+            "输出：酒馆 打听消息 奇怪事件 附近\n\n"
+            "玩家输入：\"你好\"\n"
+            "输出：你好"
+        )
+        parts = [f"玩家输入: {user_input}"]
+        if context:
+            parts.append(context)
+        messages = [{"role": "user", "content": "\n".join(parts)}]
+        result = self.chat(system=system, messages=messages)
+        if not result or not result.strip():
+            return ""
+        return result.strip()

@@ -1,3 +1,4 @@
+import { useEffect, useRef } from 'react'
 import { useGameStore } from '../store/gameStore'
 
 interface ModalSettingsProps {
@@ -8,6 +9,11 @@ export default function ModalSettings({ onClose }: ModalSettingsProps) {
   const {
     worldSimulationEnabled,
     setWorldSimulationEnabled,
+    debugMode,
+    setDebugMode,
+    debugLogs,
+    appendDebugLogs,
+    clearDebugLogs,
     setGameStarted,
     clearMessages,
     setSuggestions,
@@ -16,6 +22,47 @@ export default function ModalSettings({ onClose }: ModalSettingsProps) {
     setIsLoading,
     setError,
   } = useGameStore()
+
+  const logEndRef = useRef<HTMLDivElement>(null)
+  const pollingTimer = useRef<ReturnType<typeof setInterval>>()
+
+  // 调试模式开启时轮询后端日志
+  useEffect(() => {
+    if (debugMode) {
+      pollingTimer.current = setInterval(async () => {
+        try {
+          const res = await fetch('/api/debug')
+          const data = await res.json()
+          if (data.logs?.length > 0) {
+            appendDebugLogs(data.logs)
+          }
+        } catch {
+          // 后端未响应，忽略
+        }
+      }, 2000)
+    } else {
+      clearInterval(pollingTimer.current)
+    }
+    return () => clearInterval(pollingTimer.current)
+  }, [debugMode])
+
+  // 日志自动滚动到底部
+  useEffect(() => {
+    logEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [debugLogs])
+
+  const handleToggleDebug = async () => {
+    try {
+      const res = await fetch('/api/debug/toggle', { method: 'POST' })
+      const data = await res.json()
+      setDebugMode(data.debug)
+      if (data.debug) {
+        clearDebugLogs()
+      }
+    } catch {
+      setDebugMode(!debugMode)
+    }
+  }
 
   const handleSave = async () => {
     try {
@@ -39,7 +86,6 @@ export default function ModalSettings({ onClose }: ModalSettingsProps) {
       if (data.error) {
         alert(data.error)
       } else {
-        // 更新前端状态
         if (data.state) setPlayerState(data.state)
         if (data.npcs) setNpcs(data.npcs)
         setSuggestions([])
@@ -65,19 +111,19 @@ export default function ModalSettings({ onClose }: ModalSettingsProps) {
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div
-        className="modal-content w-full max-w-md mx-auto mt-20"
+        className="modal-content w-full max-w-md mx-auto mt-4 max-h-[90vh] flex flex-col"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
-        <div className="flex items-center justify-between p-4 border-b border-coal-700">
+        <div className="flex items-center justify-between p-4 border-b border-coal-700 shrink-0">
           <h2 className="text-xl font-serif text-brass-400">游戏设置</h2>
           <button onClick={onClose} className="text-coal-400 hover:text-coal-200 text-2xl leading-none">
             ×
           </button>
         </div>
 
-        {/* Content */}
-        <div className="p-4 space-y-6">
+        {/* Scrollable content */}
+        <div className="overflow-y-auto p-4 space-y-6">
           {/* World Simulation */}
           <div>
             <h3 className="text-sm text-coal-300 mb-2">世界模拟</h3>
@@ -99,6 +145,56 @@ export default function ModalSettings({ onClose }: ModalSettingsProps) {
                 />
               </button>
             </div>
+          </div>
+
+          {/* Debug Mode */}
+          <div>
+            <h3 className="text-sm text-coal-300 mb-2">调试模式</h3>
+            <div className="flex items-center justify-between p-3 bg-coal-800 rounded border border-coal-700">
+              <div>
+                <p className="text-sm text-coal-200">启用 GM 调试日志</p>
+                <p className="text-xs text-coal-500">显示 LLM 调用、工具执行、记忆检索等诊断信息</p>
+              </div>
+              <button
+                onClick={handleToggleDebug}
+                className={`w-12 h-6 rounded-full transition-all duration-200 ${
+                  debugMode ? 'bg-brass-600' : 'bg-coal-600'
+                }`}
+              >
+                <div
+                  className={`w-5 h-5 rounded-full bg-coal-50 shadow transition-transform duration-200 ${
+                    debugMode ? 'translate-x-6' : 'translate-x-0.5'
+                  }`}
+                />
+              </button>
+            </div>
+
+            {/* Debug log panel */}
+            {debugMode && (
+              <div className="mt-3 p-3 bg-coal-950 border border-coal-700 rounded max-h-48 overflow-y-auto">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-xs text-brass-500 font-mono">DEBUG LOG</span>
+                  <button
+                    onClick={clearDebugLogs}
+                    className="text-xs text-coal-500 hover:text-coal-300"
+                  >
+                    清空
+                  </button>
+                </div>
+                {debugLogs.length === 0 ? (
+                  <p className="text-xs text-coal-500 italic">等待日志输出...</p>
+                ) : (
+                  <div className="space-y-1">
+                    {debugLogs.map((log, i) => (
+                      <p key={i} className="text-xs text-coal-300 font-mono whitespace-pre-wrap leading-relaxed">
+                        {log}
+                      </p>
+                    ))}
+                    <div ref={logEndRef} />
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           {/* Save/Load */}

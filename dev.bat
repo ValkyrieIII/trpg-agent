@@ -1,25 +1,24 @@
 @echo off
 chcp 65001 >nul
 echo ========================================
-echo   TRPG Agent 一键启动
+echo   TRPG Agent 开发模式 (热更新)
 echo ========================================
 echo.
 
 REM 检查 Python
 python --version >nul 2>&1
 if %errorlevel% neq 0 (
-    echo [错误] 未找到 Python，请先安装 Python 3.13+
+    echo [错误] 未找到 Python
     pause
     exit /b 1
 )
 
-REM 检查 Node.js
+REM 检查 Node.js (尝试自动安装)
 node --version >nul 2>&1
 if %errorlevel% neq 0 (
     echo [提示] 未找到 Node.js，尝试自动安装...
     where winget >nul 2>&1
     if %errorlevel% equ 0 (
-        echo 正在通过 winget 安装 Node.js LTS...
         winget install OpenJS.NodeJS.LTS --silent --accept-package-agreements --accept-source-agreements
         if %errorlevel% equ 0 (
             echo [✓] Node.js 安装成功，请重新运行此脚本
@@ -33,7 +32,7 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
-REM 从 .env 文件加载 API Key（如果环境变量未设置）
+REM 从 .env 文件加载 API Key
 if "%DEEPSEEK_API_KEY%"=="" (
     if exist ".env" (
         for /f "usebackq tokens=1,2 delims==" %%a in (".env") do (
@@ -42,9 +41,7 @@ if "%DEEPSEEK_API_KEY%"=="" (
     )
 )
 
-REM 检查 API Key
 if "%DEEPSEEK_API_KEY%"=="" (
-    echo [提示] 未设置 DEEPSEEK_API_KEY，请在 .env 文件中配置或设置环境变量
     set /p API_KEY=请输入你的 DeepSeek API Key:
     if "!API_KEY!"=="" (
         echo [错误] API Key 不能为空
@@ -54,34 +51,32 @@ if "%DEEPSEEK_API_KEY%"=="" (
     set DEEPSEEK_API_KEY=!API_KEY!
 )
 
-echo [1/5] 安装 Python 依赖...
-pip install fastapi uvicorn >nul 2>&1
-if %errorlevel% neq 0 (
-    echo [警告] pip install 失败，尝试继续...
-)
+echo [1/3] 安装 Python 依赖...
+pip install fastapi uvicorn python-dotenv >nul 2>&1
 
-echo [2/5] 安装前端依赖...
+echo [2/3] 安装前端依赖...
 cd web
 call npm install >nul 2>&1
-if %errorlevel% neq 0 (
-    echo [警告] npm install 失败，尝试继续...
-)
 cd ..
 
-echo [3/5] 构建前端...
-cd web
-call npm run build >nul 2>&1
-cd ..
-
-echo [4/5] 启动后端服务...
-echo [提示] 按 Ctrl+C 可停止服务
+echo [3/3] 启动服务...
 echo.
 echo ========================================
-echo   浏览器打开: http://localhost:8000
+echo   前端 (热更新): http://localhost:5173
+echo   后端 API:     http://localhost:8000
+echo   按 Ctrl+C 停止所有服务
 echo ========================================
 echo.
 
+REM 设置环境变量
 set HF_ENDPOINT=https://hf-mirror.com
+
+REM 在同一窗口启动两个进程: Vite 后台 + Python 前台
+start "Vite Dev Server" /b cmd /c "cd web && npx vite --host"
+REM 等 Vite 启动
+timeout /t 3 /nobreak >nul
 python -m trpg_agent.api_server
 
+REM Ctrl+C 后会到这里，关闭 Vite 进程
+taskkill /f /fi "WINDOWTITLE eq Vite Dev Server" >nul 2>&1
 pause

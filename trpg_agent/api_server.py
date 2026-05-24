@@ -13,6 +13,12 @@ import os
 from pathlib import Path
 from typing import AsyncGenerator
 
+from dotenv import load_dotenv
+load_dotenv()
+
+# 显式禁用 ChromaDB 遥测（必须在 import chromadb 之前设置）
+os.environ.setdefault("ANONYMIZED_TELEMETRY", "False")
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -49,10 +55,11 @@ def _get_gm() -> GameMaster:
         return _gm
 
     api_key = os.environ.get("DEEPSEEK_API_KEY", "")
+    debug = os.environ.get("TRPG_DEBUG", "").lower() in ("true", "1", "yes")
     _gm = GameMaster(
         config_path=_config_path,
         llm_api_key=api_key,
-        debug=False,
+        debug=debug,
     )
     return _gm
 
@@ -171,6 +178,33 @@ async def api_command(body: dict):
         command = body.get("command", "")
         result = gm._handle_world_builder_command(command)
         return {"result": result}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# ------------------------------------------------------------------
+#  Debug endpoint
+# ------------------------------------------------------------------
+
+@app.get("/api/debug")
+async def api_debug():
+    """获取 GM 调试日志并清空缓冲区。"""
+    try:
+        gm = _get_gm()
+        logs = list(gm._debug_log)
+        gm._debug_log.clear()
+        return {"debug": gm.debug, "logs": logs}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.post("/api/debug/toggle")
+async def api_debug_toggle():
+    """切换调试模式。"""
+    try:
+        gm = _get_gm()
+        gm.debug = not gm.debug
+        return {"debug": gm.debug}
     except Exception as e:
         return {"error": str(e)}
 

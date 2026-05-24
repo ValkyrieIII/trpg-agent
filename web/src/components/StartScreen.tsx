@@ -1,12 +1,37 @@
-import { useState } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useGameStore } from '../store/gameStore'
 
+const LOADING_STEPS = [
+  '连接 LLM...',
+  '加载角色卡...',
+  '初始化 NPC 存储...',
+  '初始化记忆存储...',
+  '初始化知识库...',
+  '加载世界知识...',
+  '正在生成开场叙述...',
+]
+
 export default function StartScreen() {
-  const { setGameStarted, setIsLoading, error, setError, addMessage, setSuggestions, setPlayerState, setNpcs } = useGameStore()
+  const { setGameStarted, setIsLoading, isLoading, error, setError, addMessage, setSuggestions, setPlayerState, setNpcs } = useGameStore()
   const [mode, setMode] = useState<'new' | 'load'>('new')
   const [worldView, setWorldView] = useState('')
   const [npcSetup, setNpcSetup] = useState('')
   const [showAdvanced, setShowAdvanced] = useState(false)
+  const [loadingStep, setLoadingStep] = useState(0)
+  const loadingTimer = useRef<ReturnType<typeof setInterval>>()
+
+  // 加载时轮换进度描述
+  useEffect(() => {
+    if (isLoading) {
+      setLoadingStep(0)
+      loadingTimer.current = setInterval(() => {
+        setLoadingStep((prev) => (prev < LOADING_STEPS.length - 1 ? prev + 1 : prev))
+      }, 1500)
+    } else {
+      clearInterval(loadingTimer.current)
+    }
+    return () => clearInterval(loadingTimer.current)
+  }, [isLoading])
 
   const handleStart = async () => {
     setIsLoading(true)
@@ -124,21 +149,23 @@ export default function StartScreen() {
           <div className="flex gap-3 mb-6">
             <button
               onClick={() => setMode('new')}
+              disabled={isLoading}
               className={`flex-1 py-2 rounded text-center transition-all duration-200 border ${
                 mode === 'new'
                   ? 'bg-brass-700/20 border-brass-600 text-brass-300'
                   : 'bg-coal-800 border-coal-600 text-coal-400 hover:border-brass-700/50'
-              }`}
+              } disabled:opacity-50 disabled:cursor-not-allowed`}
             >
               新游戏
             </button>
             <button
               onClick={() => setMode('load')}
+              disabled={isLoading}
               className={`flex-1 py-2 rounded text-center transition-all duration-200 border ${
                 mode === 'load'
                   ? 'bg-brass-700/20 border-brass-600 text-brass-300'
                   : 'bg-coal-800 border-coal-600 text-coal-400 hover:border-brass-700/50'
-              }`}
+              } disabled:opacity-50 disabled:cursor-not-allowed`}
             >
               加载存档
             </button>
@@ -156,6 +183,7 @@ export default function StartScreen() {
                   onChange={(e) => setWorldView(e.target.value)}
                   placeholder="例：蒸汽朋克世界，第五纪1350年，鲁恩王国首都贝克兰德..."
                   className="input-field w-full h-20 resize-none text-sm"
+                  disabled={isLoading}
                 />
               </div>
 
@@ -169,6 +197,7 @@ export default function StartScreen() {
                   onChange={(e) => setNpcSetup(e.target.value)}
                   placeholder="例：我的妹妹艾莉西亚，温柔但倔强；邻居老马，退休的蒸汽工程师..."
                   className="input-field w-full h-16 resize-none text-sm"
+                  disabled={isLoading}
                 />
               </div>
 
@@ -189,10 +218,23 @@ export default function StartScreen() {
 
               <button
                 onClick={handleStart}
-                className="w-full py-3 btn-primary text-lg"
+                disabled={isLoading}
+                className="w-full py-3 btn-primary text-lg disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                开始冒险
+                {isLoading ? LOADING_STEPS[loadingStep] : '开始冒险'}
               </button>
+
+              {/* Loading progress bar */}
+              {isLoading && (
+                <div className="mt-3">
+                  <div className="h-1 bg-coal-800 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-brass-600 rounded-full transition-all duration-1000 animate-pulse"
+                      style={{ width: `${((loadingStep + 1) / LOADING_STEPS.length) * 100}%` }}
+                    />
+                  </div>
+                </div>
+              )}
             </div>
           ) : (
             <div className="space-y-4">
@@ -201,9 +243,10 @@ export default function StartScreen() {
               </p>
               <button
                 onClick={handleLoad}
-                className="w-full py-3 btn-primary text-lg"
+                disabled={isLoading}
+                className="w-full py-3 btn-primary text-lg disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                加载存档
+                {isLoading ? '加载中...' : '加载存档'}
               </button>
             </div>
           )}

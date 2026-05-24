@@ -73,6 +73,13 @@ interface GameState {
   // World simulation
   worldSimulationEnabled: boolean
   setWorldSimulationEnabled: (enabled: boolean) => void
+
+  // Debug
+  debugMode: boolean
+  setDebugMode: (enabled: boolean) => void
+  debugLogs: string[]
+  appendDebugLogs: (logs: string[]) => void
+  clearDebugLogs: () => void
 }
 
 export const useGameStore = create<GameState>((set) => ({
@@ -120,4 +127,11 @@ export const useGameStore = create<GameState>((set) => ({
 
   worldSimulationEnabled: true,
   setWorldSimulationEnabled: (worldSimulationEnabled) => set({ worldSimulationEnabled }),
+
+  debugMode: false,
+  setDebugMode: (debugMode) => set({ debugMode }),
+  debugLogs: [],
+  appendDebugLogs: (logs) =>
+    set((state) => ({ debugLogs: [...state.debugLogs, ...logs] })),
+  clearDebugLogs: () => set({ debugLogs: [] }),
 }))

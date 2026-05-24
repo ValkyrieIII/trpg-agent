@@ -24,6 +24,14 @@ from typing import Any, Dict, List, Optional
 
 import yaml
 
+from agents import Runner
+
+from trpg_agent.agent_config import (
+    GameContext,
+    configure_deepseek,
+    create_gm_agent,
+    build_gm_instructions,
+)
 from trpg_agent.character import Character
 from trpg_agent.dice import roll
 from trpg_agent.llm import LLM
@@ -275,6 +283,7 @@ class GameMaster:
         status_fn: object = None,
     ) -> None:
         self.debug = debug
+        self._debug_log: List[str] = []
         status = status_fn or (lambda msg: None)
 
         # -- LLM (第一步连接，后续 NPC 生成等需要用到) --
@@ -287,6 +296,8 @@ class GameMaster:
         try:
             self.llm = LLM()
             self._llm_available = True
+            # Configure OpenAI Agents SDK to use DeepSeek
+            configure_deepseek()
         except (RuntimeError, Exception):
             pass
 
@@ -343,8 +354,8 @@ class GameMaster:
         # -- Register backstory NPCs (LLM must be connected first) --
         if self._llm_available:
             self._register_backstory_npcs()
-        elif self.debug:
-            print("[DEBUG] LLM 未连接，跳过后设故事 NPC 注册")
+        else:
+            self._debug("[DEBUG] LLM 未连接，跳过后设故事 NPC 注册")
 
         # -- World Builder (LLM-driven NPC/world creation) --
         self.world_builder = None
@@ -356,6 +367,39 @@ class GameMaster:
                 knowledge=self.knowledge,
                 debug=self.debug,
             )
+
+        # -- OpenAI Agents SDK: GM Agent + conversation history --
+        self.history_messages: list[dict[str, str]] = []
+        self._npc_agents: dict[str, Any] = {}
+        if self._llm_available:
+            from trpg_agent.tools import (
+                roll_dice, difficulty_check, skill_check, combat_attack,
+                get_player_state, get_npc_state,
+                create_npc, remove_npc, set_scene, game_over,
+                search_knowledge, search_memory, invoke_npc,
+            )
+            self.gm_agent = create_gm_agent(tools=[
+                roll_dice, difficulty_check, skill_check, combat_attack,
+                get_player_state, get_npc_state,
+                create_npc, invoke_npc, remove_npc, set_scene, game_over,
+                search_knowledge, search_memory,
+            ])
+        else:
+            self.gm_agent = None
+
+        # -- Sync NPC Agents for any NPCs already in the store (backstory, etc.) --
+        if self._llm_available:
+            self._sync_npc_agents()
+
+    def _debug(self, msg: str) -> None:
+        """Log a debug message. Prints to stdout and stores in an internal buffer
+        that the API server can expose via /api/debug."""
+        if self.debug:
+            print(msg)
+        self._debug_log.append(msg)
+        # 防止 CLI 长时间运行时缓冲区无限增长
+        if len(self._debug_log) > 500:
+            self._debug_log = self._debug_log[-300:]
 
     # ===================================================================
     #  SOFT-DELETED: embedding-based event classification
@@ -515,12 +559,10 @@ class GameMaster:
                 )
                 self.scene_npcs.append(name)
 
-                if self.debug:
-                    print(f"[DEBUG] 注册后设故事 NPC: {name} (语调: {tone})")
+                self._debug(f"[DEBUG] 注册后设故事 NPC: {name} (语调: {tone})")
 
         except Exception as e:
-            if self.debug:
-                print(f"[DEBUG] 后设故事 NPC 提取失败: {e}")
+            self._debug(f"[DEBUG] 后设故事 NPC 提取失败: {e}")
 
     @staticmethod
     def _default_personality_for(relation: str) -> Dict[str, Any]:
@@ -860,8 +902,7 @@ class GameMaster:
                     f"\n\n【与该玩家的过往交集（与当前情境最相关）】\n{npc_mem_text}"
                 )
         except Exception as e:
-            if self.debug:
-                print(f"[DEBUG] NPC 记忆检索失败 ({name}): {e}")
+            self._debug(f"[DEBUG] NPC 记忆检索失败 ({name}): {e}")
 
         # Build messages from NPC history + current player input
         npc_messages = list(self.npc_store.get_history(name))
@@ -1006,6 +1047,160 @@ class GameMaster:
     #  Context builder & response renderer
     # ------------------------------------------------------------------
 
+    def _build_input(self, user_input: str) -> str:
+        """Build the input text for the GM Agent, including memory + knowledge + context.
+
+        Returns a single string to pass as Runner.run_sync() input.
+        """
+        # -- Enriched search query --
+        enriched_query = ""
+        if self._llm_available and self.llm:
+            context = ""
+            if self.scene_npcs:
+                context = "当前场景NPC：" + ", ".join(self.scene_npcs)
+            enriched_query = self.llm.generate_search_query(user_input, context)
+
+        if not enriched_query:
+            enriched_query = user_input
+            if self.scene_npcs:
+                enriched_query += " " + " ".join(self.scene_npcs[:3])
+
+        # Questions about past events: skip recent bias
+        is_retrospective = any(
+            kw in user_input
+            for kw in ["之前", "发生了", "还记得", "上次", "过去", "以前", "那天"]
+        )
+        if self._recent_events and not is_retrospective:
+            enriched_query += " " + " ".join(list(self._recent_events)[-1:])
+
+        # -- Memory retrieval --
+        memories = self.memory.full_retrieve(enriched_query)
+        memories = [m for m in memories if m.get("type", "") != "npc_dialogue"]
+
+        memory_lines: list = []
+        seen_prefixes: set = set()
+        for m in memories[:5]:
+            content = m["content"]
+            rel = m.get("relation", "")
+            if rel:
+                memory_lines.append(f"- {content} （{rel}）")
+            else:
+                memory_lines.append(f"- {content}")
+            seen_prefixes.add(content[:20])
+
+        if self._recent_events:
+            for text in list(self._recent_events)[-5:]:
+                if text and text[:20] not in seen_prefixes:
+                    memory_lines.append(f"- {text}")
+                    seen_prefixes.add(text[:20])
+                    if len(memory_lines) >= 8:
+                        break
+
+        memory_text = (
+            "## 记忆\n" + "\n".join(memory_lines) if memory_lines else ""
+        )
+
+        if self.debug:
+            lines = [
+                f"[DEBUG] 记忆检索(query='{enriched_query[:60]}...'): "
+                f"{len(memories)}条 (合并后{len(memory_lines)}条)"
+            ]
+            for line in memory_lines[:3]:
+                lines.append(f"  {line[:80]}")
+            self._debug("\n".join(lines))
+
+        # -- Knowledge retrieval --
+        knowledge = self.knowledge.query(user_input, self.player.name)
+        knowledge_text = ""
+        if knowledge:
+            knowledge_text = "## 世界知识\n" + "\n".join(
+                f"- {k}" for k in knowledge[:3]
+            )
+        self._debug(f"[DEBUG] 知识检索: {len(knowledge)}条")
+
+        # -- Assemble input --
+        parts = []
+        if memory_text:
+            parts.append(memory_text)
+        if knowledge_text:
+            parts.append(knowledge_text)
+
+        # Previous turn context (for suggestion continuity)
+        if self._last_gm_response:
+            parts.append(
+                f"## 上一轮 GM 回应\n{self._last_gm_response}"
+            )
+
+        # Player input
+        parts.append(f"玩家: {user_input}")
+        parts.append(
+            "请在叙述结束时列出3个建议行动选项：\n1. 建议一\n2. 建议二\n3. 建议三"
+        )
+
+        return "\n\n".join(parts)
+
+    def _build_game_context(self) -> GameContext:
+        """Build the GameContext dataclass with current game state."""
+        return GameContext(
+            player_state=self.player_state,
+            npc_store=self.npc_store,
+            memory=self.memory,
+            knowledge=self.knowledge,
+            scene_npcs=self.scene_npcs,
+            time_of_day=self._time_of_day,
+            weather=self._weather,
+            player_name=self.player.name,
+            player_card=self.player.summary(),
+            player_skills=self.player.skills,
+            player_attributes=self.player.attributes,
+            npc_agents=self._npc_agents,
+            history_messages=self.history_messages,
+            llm=self.llm,
+            game_over=self._game_over,
+        )
+
+    def _format_history(self) -> str:
+        """Format recent conversation history for context."""
+        if not self.history_messages:
+            return ""
+        lines = ["## 最近对话"]
+        for msg in self.history_messages[-6:]:  # last 3 exchanges
+            role = "玩家" if msg["role"] == "user" else "GM"
+            content = msg["content"][:200]
+            lines.append(f"{role}: {content}")
+        return "\n".join(lines) + "\n\n"
+
+    def _trim_history(self, max_exchanges: int = 5) -> None:
+        """Keep only the most recent N exchanges in history."""
+        max_messages = max_exchanges * 2  # user + assistant per exchange
+        if len(self.history_messages) > max_messages:
+            self.history_messages = self.history_messages[-max_messages:]
+
+    def _sync_npc_agents(self) -> None:
+        """Ensure every NPC in the store has a corresponding Agent in the pool.
+
+        Called at startup (after backstory NPC registration) and after loading a save,
+        so that initial NPCs don't have to wait for a create_npc tool call to get
+        their autonomous Agent.
+        """
+        if not self._llm_available:
+            return
+
+        from trpg_agent.npc_agent import create_npc_agent
+
+        for npc_char in self.npc_store.all():
+            name = npc_char.name
+            if name not in self._npc_agents:
+                try:
+                    self._npc_agents[name] = create_npc_agent(
+                        name=name,
+                        personality_prompt=npc_char.build_personality_prompt(),
+                        npc_store=self.npc_store,
+                    )
+                    self._debug(f"[DEBUG] 同步 NPC Agent: {name}")
+                except Exception as e:
+                    self._debug(f"[DEBUG] NPC Agent 创建失败 ({name}): {e}")
+
     def _build_gm_context(self, user_input: str) -> tuple[str, list[dict]]:
         """Build the system prompt and user message for the GM Agent.
 
@@ -1029,10 +1224,20 @@ class GameMaster:
             .replace("{player_card}", player_card)
         )
 
-        # -- Memories (enriched query: adapt to question type) --
-        enriched_query = user_input
-        if self.scene_npcs:
-            enriched_query += " " + " ".join(self.scene_npcs[:3])
+        # -- Memories (LLM-generated query for better semantic matching) --
+        enriched_query = ""
+        if self._llm_available:
+            context = ""
+            if self.scene_npcs:
+                context = "当前场景NPC：" + ", ".join(self.scene_npcs)
+            enriched_query = self.llm.generate_search_query(user_input, context)
+
+        # fallback: LLM unavailable or returned empty
+        if not enriched_query:
+            enriched_query = user_input
+            if self.scene_npcs:
+                enriched_query += " " + " ".join(self.scene_npcs[:3])
+
         # Questions about past events: skip recent bias to avoid echo chamber
         is_retrospective = any(kw in user_input for kw in ["之前", "发生了", "还记得", "上次", "过去", "以前", "那天"])
         if self._recent_events and not is_retrospective:
@@ -1064,11 +1269,12 @@ class GameMaster:
         memory_text = "## 记忆\n" + "\n".join(memory_lines) if memory_lines else ""
 
         if self.debug:
-            print(
+            lines = [
                 f"[DEBUG] 记忆检索(query='{enriched_query[:60]}...'): {len(memories)}条 (合并后{len(memory_lines)}条)"
-            )
+            ]
             for line in memory_lines[:3]:
-                print(f"  {line[:80]}")
+                lines.append(f"  {line[:80]}")
+            self._debug("\n".join(lines))
 
         knowledge = self.knowledge.query(user_input, self.player.name)
         knowledge_text = ""
@@ -1076,8 +1282,7 @@ class GameMaster:
             knowledge_text = "## 世界知识\n" + "\n".join(
                 f"- {k}" for k in knowledge[:3]
             )
-        if self.debug:
-            print(f"[DEBUG] 知识检索: {len(knowledge)}条")
+        self._debug(f"[DEBUG] 知识检索: {len(knowledge)}条")
 
         # -- Assemble user message --
         user_message_parts = []
@@ -1181,19 +1386,19 @@ class GameMaster:
     # ===================================================================
 
     def process(self, user_input: str, console=None) -> str:
-        """单轮对话处理入口 — GM Agent 工具调用循环。
+        """Single turn entry point — SDK Runner-driven tool calling loop.
 
         Parameters
         ----------
         user_input : str
-            玩家的输入文本。
+            Player's input text.
         console
-            Rich Console 对象，用于流式输出。若为 None 则不使用流式。
+            Rich Console object for streaming output. Disabled if None.
 
         Returns
         -------
         str
-            GM 的回复文本。
+            GM's reply text.
         """
         user_input = user_input.strip()
         if not user_input:
@@ -1201,213 +1406,86 @@ class GameMaster:
 
         self._last_user_input = user_input
 
-        # ---- Command routing: world builder → 交由 GM Agent 叙事 ----
+        # ---- Command routing: world builder ---- (kept as-is)
         if self.world_builder and user_input.startswith("!"):
             world_result = self._handle_world_builder_command(user_input)
             if world_result:
-                # 把命令结果作为上下文交给 GM Agent 做叙事过渡
                 return self._narrate_world_builder_result(world_result, user_input)
 
-        if self.debug:
-            print(f"\n{'─'*50}")
-            print(f"[DEBUG] 玩家输入: {user_input}")
+        self._debug(f"\n{'─'*50}\n[DEBUG] 玩家输入: {user_input}")
 
         # ---- Fallback: LLM not available ----
-        if not self._llm_available or not self.llm:
+        if not self._llm_available or not self.llm or self.gm_agent is None:
             response = self._fallback_response(user_input)
-            if self.debug:
-                print(f"[DEBUG] LLM 不可用，使用 fallback")
+            self._debug("[DEBUG] LLM 不可用，使用 fallback")
             return response
 
         # ---- Build context ----
-        system_prompt, messages = self._build_gm_context(user_input)
+        input_text = self._build_input(user_input)
+        game_ctx = self._build_game_context()
 
-        # ---- Tool calling loop ----
-        tool_round = 0
-        _empty_retries = 0
-        all_results: List[str] = []
-        all_narrations: List[str] = []
-        all_involved: List[str] = []
-        suggestions: List[str] = []
+        # Update GM instructions with current world state
+        world_setting = self.world.get("description", self.world.get("name", "未知世界"))
+        scene_npcs_text = ", ".join(self.scene_npcs) if self.scene_npcs else "无"
+        self.gm_agent.instructions = build_gm_instructions(
+            world_setting=world_setting,
+            player_name=self.player.name,
+            player_card=self.player.summary(),
+            time_of_day=self._time_of_day,
+            weather=self._weather,
+            scene_npcs=scene_npcs_text,
+        )
 
-        # Accumulated text for display
-        _display_text: str = ""
+        # ---- SDK Runner: automatic tool-calling loop ----
+        try:
+            result = Runner.run_sync(
+                self.gm_agent,
+                input=input_text,
+                context=game_ctx,
+                max_turns=10,
+            )
+            response = result.final_output
+        except Exception as e:
+            self._debug(f"[DEBUG] Runner.run_sync 失败: {e}")
+            return self._fallback_response(user_input)
 
-        def _stream_text(text: str) -> None:
-            """流式输出文本到控制台。"""
-            nonlocal _display_text
-            if not text:
-                return
-            _display_text += text
-            if console:
-                from rich.text import Text
-                console.print(Text(text), end="")
+        # ---- Update history ----
+        self.history_messages.append({"role": "user", "content": user_input})
+        self.history_messages.append({"role": "assistant", "content": response})
+        self._trim_history()
 
-        while tool_round < _MAX_TOOL_ROUNDS:
+        # ---- Sync GameContext state back from potentially-mutated dataclass ----
+        self._time_of_day = game_ctx.time_of_day
+        self._weather = game_ctx.weather
+        self._game_over = game_ctx.game_over
+
+        # ---- Write memory (always persist; the Agent decides what matters via actions) ----
+        if not self._game_over and response:
             try:
-                gm_json = self.llm.chat_json(system=system_prompt, messages=messages)
-            except Exception as e:
-                if self.debug:
-                    print(f"[DEBUG] LLM 调用失败: {e}")
-                return self._rebuild_response(user_input, [], [])
-
-            # 隐藏 thinking，只用于调试
-            thinking = gm_json.get("thinking", "")
-            narration = self._sanitize_narration(gm_json.get("narration", ""))
-            gm_json["narration"] = narration
-            tool_calls = gm_json.get("tool_calls", [])
-            involved_npcs = gm_json.get("involved_npcs", [])
-            persist_memory = gm_json.get("persist_memory", True)
-            suggestions = gm_json.get("suggestions", [])
-
-            if isinstance(involved_npcs, list):
-                for npc_name in involved_npcs:
-                    if (
-                        npc_name
-                        and isinstance(npc_name, str)
-                        and npc_name not in all_involved
-                    ):
-                        all_involved.append(npc_name)
-
-            # thinking 不输出到终端，仅调试可见
-            if narration:
-                if console and all_narrations:
-                    _stream_text("\n\n")
-                _stream_text(narration)
-                all_narrations.append(narration)
-
-            if self.debug and thinking:
-                print(
-                    f"[DEBUG] GM 思考: {thinking[:80]}{'...' if len(thinking) > 80 else ''}"
-                )
-            if self.debug:
-                print(
-                    f"[DEBUG] GM 叙述: {narration[:80]}{'...' if len(narration) > 80 else ''}"
-                )
-                print(
-                    f"[DEBUG] GM 工具调用: {[tc.get('tool') for tc in tool_calls] if tool_calls else '无'}"
-                )
-
-            # ---- No tool calls → done ----
-            if not tool_calls:
-                if not narration and not thinking and not all_narrations:
-                    _empty_retries += 1
-                    if _empty_retries <= 1:
-                        if self.debug:
-                            print("[DEBUG] GM 返回空响应，重试一次...")
-                        messages.append(
-                            {
-                                "role": "assistant",
-                                "content": json.dumps(gm_json, ensure_ascii=False),
-                            }
-                        )
-                        messages.append(
-                            {
-                                "role": "user",
-                                "content": "你的 narration 字段为空。请生成场景叙述，至少一句话。不要返回空 narration。",
-                            }
-                        )
-                        continue
-                    else:
-                        if self.debug:
-                            print("[DEBUG] GM 连续空响应，使用重建回应")
-                        response = self._rebuild_response(user_input, all_results, all_involved)
-                        break
-
-                if not self._game_over and persist_memory:
-                    self._write_memory(user_input, "\n\n".join(all_narrations), all_results)
-                    for npc_name in all_involved:
-                        combined = f"以下事件与{npc_name}相关，请从{npc_name}的视角提取记忆:\n玩家: {user_input}\n事件: {'; '.join(all_narrations[:3])}"
-                        self._write_npc_memory(npc_name, combined)
-                response = (
-                    "\n\n".join(all_narrations) if self._game_over
-                    else self._render_accumulated(all_narrations, suggestions)
-                )
-                break
-
-            # ---- Execute tools ----
-            round_results: List[str] = []
-            check_lines: List[str] = []
-            for tc in tool_calls:
-                tool_name = tc.get("tool", "")
-                params = tc.get("params", {})
-                if self.debug:
-                    print(f"[DEBUG] 执行工具: {tool_name}({params})")
-                result = self._execute_tool(tool_name, params)
-                round_results.append(
-                    f"- {tool_name}({json.dumps(params, ensure_ascii=False)}): {result}"
-                )
-                check_line = self._format_check_result(tool_name, result)
-                if check_line:
-                    check_lines.append(check_line)
-                if self.debug:
-                    print(f"[DEBUG] 工具结果: {result}")
-
-            # Append check results after the narration
-            if check_lines:
-                check_text = "（" + "｜".join(check_lines) + "）"
-                _stream_text("\n" + check_text)
-                all_narrations.append(check_text)
-
-            all_results.extend(round_results)
-            tool_round += 1
-
-            # ---- Feed results back to GM ----
-            tool_feedback = "工具执行结果:\n" + "\n".join(round_results)
-            tool_feedback += (
-                "\n\n以上是系统检定结果。请基于这些真实结果继续叙述。不要修改或忽略系统返回的数值。\n"
-                '{"thinking": "...", "narration": "...", "tool_calls": [...], "involved_npcs": [...], "persist_memory": false, "suggestions": ["...", "...", "..."]}'
-            )
-            messages.append(
-                {
-                    "role": "assistant",
-                    "content": json.dumps(gm_json, ensure_ascii=False),
-                }
-            )
-            messages.append({"role": "user", "content": tool_feedback})
-
-        else:
-            if self.debug:
-                print("[DEBUG] 达到最大工具调用轮次，返回当前叙述")
-            if not self._game_over and persist_memory:
-                self._write_memory(user_input, "\n\n".join(all_narrations), all_results)
-                for npc_name in all_involved:
-                    combined = f"以下事件与{npc_name}相关，请从{npc_name}的视角提取记忆:\n玩家: {user_input}\n事件: {'; '.join(all_narrations[:3])}"
+                self._write_memory(user_input, response, [])
+                # Write NPC memories for NPCs that were invoked during this turn
+                for npc_name in game_ctx.scene_npcs:
+                    combined = (
+                        f"以下事件与{npc_name}相关，请从{npc_name}的视角提取记忆:\n"
+                        f"玩家: {user_input}\n事件: {response[:300]}"
+                    )
                     self._write_npc_memory(npc_name, combined)
-            response = (
-                "\n\n".join(all_narrations) if self._game_over
-                else self._render_accumulated(all_narrations, suggestions)
-            )
+            except Exception as e:
+                self._debug(f"[DEBUG] 记忆写入失败: {e}")
 
-        # 输出建议（流式展示）
-        if suggestions:
-            _stream_text("\n\n")
-            for i, s in enumerate(suggestions, 1):
-                _stream_text(f"\n{i}. {s}")
-
-        # 世界自发事件：检查是否需要 NPC 自主行动
+        # ---- World simulation (kept external trigger) ----
         world_action = self._maybe_trigger_world_simulation(user_input)
-        if world_action:
-            _stream_text("\n\n" + world_action)
-
-        # 构建完整响应：包含叙述、建议、世界事件
-        if self._game_over:
-            response = "\n\n".join(all_narrations)
-        else:
-            response = self._render_accumulated(all_narrations, suggestions)
-
-        # 追加世界事件（如果尚未包含在叙述中）
         if world_action:
             response += "\n\n" + world_action
 
         if self.debug:
             state = self.player_state.get_state()
-            print(
+            self._debug(
                 f"[DEBUG] 当前状态: 情绪={state['emotion']} 信任={state['trust']} "
-                f"体力={state['stamina']}"
+                f"体力={state['stamina']}\n"
+                f"[DEBUG] 场景NPC: {self.scene_npcs}\n"
+                f"{'─'*50}"
             )
-            print(f"[DEBUG] 场景NPC: {self.scene_npcs}")
-            print(f"{'─'*50}")
 
         self._last_gm_response = response
         return response
@@ -1714,11 +1792,9 @@ class GameMaster:
             for s in similar:
                 if s.get("id") != npc_mem_id:
                     self.memory.link(npc_mem_id, s["id"], "关联到")
-            if self.debug:
-                print(f"[DEBUG] NPC 记忆写入 ({npc_name}): {extracted[:80]}")
+            self._debug(f"[DEBUG] NPC 记忆写入 ({npc_name}): {extracted[:80]}")
         except Exception as e:
-            if self.debug:
-                print(f"[DEBUG] NPC 记忆写入失败 ({npc_name}): {e}")
+            self._debug(f"[DEBUG] NPC 记忆写入失败 ({npc_name}): {e}")
 
     def _write_memory(
         self, user_input: str, narration: str, tool_results: List[str]
@@ -1756,8 +1832,7 @@ class GameMaster:
                 if prev_results and prev_results[0].get("id") != mem_id:
                     self.memory.link(mem_id, prev_results[0]["id"], "发生在...之后")
 
-            if self.debug:
-                print(f"[DEBUG] 记忆写入: {extracted}")
+            self._debug(f"[DEBUG] 记忆写入: {extracted}")
 
             return mem_id
         except Exception:
@@ -2008,10 +2083,14 @@ class GameMaster:
         if ps:
             self.player_state = StateMachine.from_dict(ps)
 
-        if self.debug:
-            print(f"[DEBUG] 存档加载成功 ({path})")
-            print(f"  场景: {self.scene_npcs}")
-            print(f"  时间: {self._time_of_day} 天气: {self._weather}")
+        self._debug(
+            f"[DEBUG] 存档加载成功 ({path})\n"
+            f"  场景: {self.scene_npcs}\n"
+            f"  时间: {self._time_of_day} 天气: {self._weather}"
+        )
+
+        # Ensure NPC Agents exist for restored NPCs
+        self._sync_npc_agents()
 
         return True
 
