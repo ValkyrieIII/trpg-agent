@@ -1,0 +1,16 @@
+{
+  "nodes": [
+    {
+      "id": "e099e1f7",
+      "content": "test memory",
+      "type": "event",
+      "timestamp": "2026-05-25T16:03:44.362079+00:00",
+      "importance": 0.5,
+      "tags": [],
+      "context": {
+        "location": "test"
+      }
+    }
+  ],
+  "edges": []
+}
