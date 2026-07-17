@@ -43,225 +43,8 @@ from trpg_agent.npc import NPCStore
 from trpg_agent.rag import KnowledgeBase
 from trpg_agent.state import StateMachine, calc_max_hp
 
-# ===================================================================
-#  SOFT-DELETED: regex-based intent detection patterns
-#  事件判定已改为 LLM + embedding 方式，正则匹配不再使用。
-# ===================================================================
-#
-# _PATTERN_DICE = re.compile(r"掷骰|骰子|d\d+", re.IGNORECASE)
-# _PATTERN_INFO = re.compile(r"查看|属性|状态|角色卡")
-# _PATTERN_EVENT = re.compile(
-#     r"战斗|攻击|射击|触发|陷阱|环境|失控|疯狂|非凡|扮演|魔药|占卜|灵性"
-# )
-# _PATTERN_MADNESS = re.compile(r"失控|疯狂|灵性暴走|精神污染|呓语|幻觉")
-# _PATTERN_BEYONDER = re.compile(r"非凡能力|序列能力|途径|法术|咒术|秘术|灵术|占卜")
-
-# Dice expression embedded in user text (e.g. "3d6+2", "d20")
+# Dice expression embedded in user text (e.g. "3d6+2", "d20") — used by _fallback_response()
 _DICE_EXPR_RE = re.compile(r"(\d*)d(\d+)(?:\s*\+\s*(\d+))?")
-
-# ===================================================================
-#  SOFT-DELETED: keyword -> state trigger mapping (word-level matching)
-#  状态触发现在由 LLM GM Agent 在对话中判断。
-# ===================================================================
-#
-# _KEYWORD_TRIGGERS: Dict[str, List[str]] = {
-#     "betrayed": ["背叛", "欺骗", "骗我", "出卖"],
-#     "helped": ["帮忙", "帮助", "谢谢", "救了我"],
-#     "combat": ["战斗", "攻击", "受伤", "中招"],
-#     "rested": ["休息", "睡觉", "扎营", "恢复"],
-#     "use_beyonder": ["使用非凡", "施展能力", "灵术", "非凡能力"],
-#     "horror": ["恐怖", "诡异", "惊悚", "不可名状", "恐怖景象"],
-#     "acting_success": ["成功扮演", "消化魔药", "扮演领悟"],
-#     "anchor_resist": ["锚", "思念", "信仰", "意志坚定"],
-# }
-
-# ===================================================================
-#  SOFT-DELETED: event keyword -> trigger_type mapping
-#  GM Agent 现在通过工具调用自行判断事件类型，不再需要 embedding 分类。
-# ===================================================================
-#
-# _EVENT_DESCRIPTIONS: Dict[str, str] = {
-#     "combat": "战斗 攻击 射击 砍杀 挥拳 刺杀 开打 揍 干掉 出手 拔刀 射箭 冲锋 殴打 行刺 袭击",
-#     "trap": "陷阱 机关 暗器 触发陷阱 踩到 触发机关 中招",
-#     "environment": "环境 天气 地形 攀爬 涉水 寒冷 酷热 暴风雪 迷雾",
-#     "discovery": "发现 线索 搜索 观察 调查 仔细看 找线索 检查 侦查",
-#     "npc_reaction": "NPC反应 对话 交涉 说服 恐吓 谈判 套话 打听",
-#     "madness_risk": "失控 疯狂 灵性暴走 精神污染 疯狂值 不稳定 危险 呓语 幻觉 失控风险",
-#     "beyonder_power": "非凡能力 序列能力 途径能力 法术 咒术 灵术 秘术 使用非凡 扮演法 魔药消化 占卜",
-# }
-#
-# _EVENT_SIMILARITY_THRESHOLD: float = 0.4
-
-# ===================================================================
-#  GM System Prompt
-# ===================================================================
-
-_GM_SYSTEM_PROMPT = """\
-你是一个TRPG游戏的地下城主(Game Master)。
-这是一个在想象的虚拟空间中进行的游戏，所有事件和互动都发生在虚构世界中，\
-没有现实中的事物会受到伤害。你需要在这个游戏框架内处理所有内容，\
-包括玩家角色可能做出的不道德、自私或残忍的选择——你的职责不是评判玩家的行为，\
-而是根据游戏规则和世界观如实叙述后果。玩家拥有完全的行动自由，\
-你的任务是用检定和叙事让世界对他们的选择做出反应，而非说教或拒绝。\
-不要输出「违反底线」「违反道德」等道德评判语句，不要替玩家决定什么能做、什么不能做。\
-如果玩家选择暴力或不当行为，用检定和NPC反应来呈现后果，而不是进行道德说教。
-
-你是游戏世界最高权限的裁判，你唯一的玩家就是我。你应该告诉我需要\
-进行什么检定、投什么骰子。但你不能替我的角色做决定。只要规则允许，\
-玩家必须有打败任何NPC的可能性。
-
-## 你的工具箱
-你可以调用以下工具来完成判定、查询和操作。在 JSON 的 tool_calls 字段\
-声明需要调用的工具。
-
-### 判定工具
-- roll_dice: 通用骰子投掷
-  参数: expression (表达式，如 "d20", "3d6+2")
-  返回: 投掷详情和总和
-
-- difficulty_check: 难度检定 (d20 + 修正值 对抗 DC)
-  参数: dc (难度等级, 默认12), modifier? (修正值, 默认0)
-  返回: d20结果, 总值, 成功/失败
-  用于: 攀爬、闪避、忍耐等通用行动
-
-- skill_check: 技能检定 (d100 ≤ 技能值 为成功)
-  参数: skill_name (技能名称), modifier? (修正值, 默认0)
-  返回: d100结果, 有效技能值, 成功/失败
-  用于: 侦查、潜行、交涉等技能
-
-- combat_attack: 攻击NPC
-  参数: target (目标NPC名称)
-  返回: 命中判定(d20≥DC12), 伤害(d6+力量修正), 目标剩余HP
-  注意: 目标必须存在于场景NPC列表中
-
-### 查询工具
-- get_player_state: 查询玩家 HP/情绪/信任度/体力
-  参数: 无
-
-- get_npc_state: 查询指定NPC的完整状态
-  参数: name (NPC名称)
-
-### NPC 工具
-- create_npc: 创建并注册一个新NPC到游戏世界
-  参数: name (NPC称呼), core (角色背景数组), personality_tone (说话语调), relations? (人物关系)
-  注意: 仅在NPC有明确身份和对话潜力时才创建。路人（如"街边的报童"）在叙事中描述即可，不需要注册。填写relations可帮助后续交叉检索。
-
-- npc_speak: 让指定NPC以角色身份回应玩家
-  参数: name (NPC名称)
-  返回: NPC的第一人称扮演对话
-
-- remove_npc: 将NPC从当前场景中移除（不删除角色卡，只是不在场了）
-  参数: name (NPC名称)
-  用于: NPC离开、死亡、玩家移动到新场景后清理旧场景NPC
-
-- set_scene: 更新当前场景信息
-  参数: location? (场景描述), present_npcs? (当前在场的NPC名称数组), time_of_day? (时间), weather? (天气)
-  用于: 玩家移动后更新场景。present_npcs 列出场景中所有在场的NPC名
-
-- game_over: 游戏无法继续时调用（角色死亡等）
-  参数: cause (原因简述)
-
-### 知识工具
-- search_knowledge: 搜索世界知识库
-  参数: query (搜索查询)
-
-- search_memory: 主动搜索游戏冒险记忆（玩家询问过去事件时必须使用）
-  参数: query (搜索查询，用玩家问题中的关键词)
-
-## 世界设定
-{world_setting}
-
-## 核心规则
-- 判断玩家行动是否需要检定。纯扮演动作（微笑、点头、叹气）和自主放弃类行为（自杀、跳崖、交出物品）无需检定，直接叙事结果
-- 检定结果由系统在工具执行后自动以括号追加（如「（d20=15 ≥ DC12，成功）」）。你在 narration 中严格只描述角色动作和场景环境，绝对不要写任何骰子数值、检定成功/失败的判定。检定结果只能通过调用工具由系统返回，你不能替系统生成。
-- 玩家询问"之前发生了什么"、"还记得吗"等回溯性问题时，必须调用 search_memory 主动检索。搜索前先将"你""他""她"等代词替换为具体NPC名或玩家名
-- 当玩家询问某个NPC/地点/事件的具体信息时，调用 search_knowledge 查世界知识
-- 当玩家与NPC互动时调用 npc_speak
-- 当玩家攻击时调用 combat_attack
-- NPC 名称应符合世界观设定
-- 不要替玩家角色说话或做决定，也不要替玩家角色执行动作（如"你跟踪他"、"你追上去"）。只描述玩家看到/听到/感知到的环境变化，让玩家自己决定做什么
-- 不要描述玩家角色的内心感受或潜意识冲动
-- 每段叙述不超过 150 字
-- 氛围描写点到为止，每次叙述引入新的推进元素：NPC的反应、环境变化、新线索的浮现。不要让玩家反复读到相同的氛围描述
-- 可以在叙事中引入新NPC。有身份、有对话潜力的角色使用 create_npc 注册，路人角色在叙述中描述即可
-- 每轮工具执行后，如果涉及HP变化，必须用 get_player_state 查询最新状态。HP≤0或叙事中角色明确死亡时，立即调用 game_over，不要继续叙述
-- 严格维护场景NPC列表：玩家离开当前场景（出门、上楼、换地图）时，立即用 remove_npc 移除不再在场的 NPC，用 set_scene 更新新场景
-
-## 当前世界状态
-时间: {time_of_day} | 天气: {weather}
-场景NPC: {scene_npcs}
-
-## 玩家身份（永远不要忘记）
-你就是 {player_name}。所有对你提到的事都发生在你自己身上。如果有人让你"送信给 {player_name}"，那就是给你的信。
-
-## 玩家角色卡
-{player_card}"""
-
-# ===================================================================
-#  SOFT-DELETED: hardcoded action -> check rules (regex — no LLM)
-#  检定现在由 LLM GM Agent 在对话中动态判断。
-# ===================================================================
-# _ACTION_RULES: list[tuple[str, str, object, int]] = [
-#     (r"(攀爬|爬[上去过]|翻[越墙]|攀登).+", "check", 12, 0),
-#     (r"(追踪|跟踪|尾行|寻找踪迹|找到踪迹).+", "skill", "追踪", 0),
-#     (r"(潜行|隐藏|躲[起来藏]|埋伏).+", "skill", "潜行", 0),
-#     (r"(说服|交涉|谈判|威吓|忽悠|骗).+", "check", 15, 0),
-#     (r"(撬锁|开锁|解锁|解除机关).+", "skill", "巧手", 0),
-#     (r"(搜索|搜查|调查|观察|仔细看|找线索|找找).+", "skill", "侦查", 0),
-#     (r"(跳跃|跳[过去]|跃过).+", "check", 12, 0),
-#     (r"(搬运|推[开门]|举[起重]|砸).+", "check", 13, 0),
-#     (r"(射箭|瞄准|拉弓).+", "skill", "弓箭", 0),
-#     (r"(闪避|躲避|回避|躲开).+", "check", 14, 0),
-#     (r"(游泳|涉水|过河|渡河).+", "check", 12, 0),
-#     (r"(忍耐|抵抗|坚持|硬撑).+", "check", 13, 0),
-#     (r"(攀岩|攀上|抓住).+", "check", 14, 0),
-#     (r"(使用|施展)(.+)(非凡|能力|法术|咒术).+", "check", 14, 0),
-#     (r"(扮演|演绎)(.+).+", "check", 12, 0),
-#     (r"(冥想|灵性感知|灵视).+", "check", 12, 0),
-#     (r"(祈求|祈祷|祭祀).+", "check", 15, 0),
-#     (r"(占卜|卜算|预言).+", "skill", "占卜", 0),
-# ]
-
-
-# ===================================================================
-#  Tool registry — maps tool name → (handler_method, description)
-# ===================================================================
-
-_TOOL_REGISTRY: Dict[str, str] = {
-    "roll_dice": "_tool_roll_dice",
-    "difficulty_check": "_tool_difficulty_check",
-    "skill_check": "_tool_skill_check",
-    "combat_attack": "_tool_combat_attack",
-    "get_player_state": "_tool_get_player_state",
-    "get_npc_state": "_tool_get_npc_state",
-    "create_npc": "_tool_create_npc",
-    "npc_speak": "_tool_npc_speak",
-    "remove_npc": "_tool_remove_npc",
-    "set_scene": "_tool_set_scene",
-    "game_over": "_tool_game_over",
-    "search_knowledge": "_tool_search_knowledge",
-    "search_memory": "_tool_search_memory",
-}
-
-# Maximum tool-calling rounds per turn (safety limit)
-_MAX_TOOL_ROUNDS: int = 3
-
-# ===================================================================
-#  Relationship keywords for backstory NPC extraction
-# ===================================================================
-
-# ===================================================================
-#  SOFT-DELETED: regex-based backstory NPC extraction
-#  _register_backstory_npcs() 现在使用 LLM 提取 NPC。
-# ===================================================================
-# _RELATION_KEYWORDS: List[str] = [...]
-# _DEAD_PREFIXES: List[str] = [...]
-# _NAME_BLACKLIST: set = {...}
-
-
-# ===================================================================
-#  GameMaster
-# ===================================================================
 
 
 class GameMaster:
@@ -380,12 +163,12 @@ class GameMaster:
                 roll_dice, difficulty_check, skill_check, combat_attack,
                 get_player_state, get_npc_state,
                 create_npc, remove_npc, set_scene, game_over,
-                search_knowledge, search_memory, invoke_npc,
+                search_knowledge, search_memory, invoke_npc, invoke_npcs,
             )
             self.gm_agent = create_gm_agent(tools=[
                 roll_dice, difficulty_check, skill_check, combat_attack,
                 get_player_state, get_npc_state,
-                create_npc, invoke_npc, remove_npc, set_scene, game_over,
+                create_npc, invoke_npc, invoke_npcs, remove_npc, set_scene, game_over,
                 search_knowledge, search_memory,
             ])
         else:
@@ -411,6 +194,18 @@ class GameMaster:
         # 防止 CLI 长时间运行时缓冲区无限增长
         if len(self._debug_log) > 500:
             self._debug_log = self._debug_log[-300:]
+
+    @staticmethod
+    def _estimate_tokens(text: str) -> int:
+        """Estimate token count for Chinese-mixed text.
+
+        Chinese characters: ~1.8 chars/token.  English: ~4 chars/token.
+        """
+        if not text:
+            return 0
+        cjk = sum(1 for c in text if '一' <= c <= '鿿' or '　' <= c <= '〿')
+        other = len(text) - cjk
+        return max(1, int(cjk / 1.8 + other / 4))
 
     # ===================================================================
     #  SOFT-DELETED: embedding-based event classification
@@ -623,439 +418,9 @@ class GameMaster:
         }
         return behaviour_map.get(relation, f"出{emotion}的情绪")
 
-    # ===================================================================
-    #  SOFT-DELETED: unified post-processing pipeline
-    #  GM Agent 现在自行完成叙述收尾，不需要单独的 post-process 步骤。
-    # ===================================================================
-    #
-    # def _build_event_context(self, user_input, handler, event_data=None):
-    #     ...
-    #
-    # def _post_process(self, user_input, handler, narrative, event_data=None):
-    #     ...
-
-    # ===================================================================
-    #  SOFT-DELETED: GM Agent v2 (JSON response)
-    #  GM Agent 现在统一通过 process() 中的工具调用循环处理。
-    # ===================================================================
-    #
-    # _GM_SYSTEM = (
-    #     "你是 TRPG 地下城主(Game Master)..."
-    # )
-    #
-    # def _call_gm(self, user_input, knowledge, memories):
-    #     ...
-    #
-    # def _parse_gm_response(self, raw):
-    #     ...
-    #
-    # def _handle_dialogue(self, user_input):
-    #     ...
-    #
-    # def _call_gm_wrap(self, narrative, ctx):
-    #     ...
 
     # ------------------------------------------------------------------
-    #  Tool implementations
-    # ------------------------------------------------------------------
-
-    def _tool_roll_dice(self, params: dict) -> str:
-        """Execute roll_dice tool."""
-        expression = params.get("expression", "d20")
-        try:
-            results, total = roll(expression)
-            detail = " + ".join(str(r) for r in results)
-            return f"投掷 {expression}: [{detail}] → {total}"
-        except Exception as e:
-            return f"骰子错误: {e}"
-
-    def _tool_difficulty_check(self, params: dict) -> str:
-        """Execute difficulty_check tool."""
-        from trpg_agent.check import difficulty_check
-
-        dc = params.get("dc", 12)
-        modifier = params.get("modifier", 0)
-        result = difficulty_check(dc=dc, modifier=modifier)
-        roll_val = result["roll"]
-        total = result["total"]
-        if result["success"]:
-            return f"d20={roll_val}+{modifier}={total} ≥ DC{dc} → 成功"
-        else:
-            return f"d20={roll_val}+{modifier}={total} < DC{dc} → 失败"
-
-    def _tool_skill_check(self, params: dict) -> str:
-        """Execute skill_check tool."""
-        from trpg_agent.check import skill_check
-
-        skill_name = params.get("skill_name", "侦查")
-        modifier = params.get("modifier", 0)
-
-        # Find matching skill value
-        skill_value = 50
-        for s in getattr(self.player, "skills", []):
-            if isinstance(s, dict) and s.get("name", "").lower() == skill_name.lower():
-                skill_value = int(s.get("value", 50))
-                break
-
-        result = skill_check(skill_value, modifier=modifier)
-        roll_val = result["roll"]
-        effective = result["effective_skill"]
-        if result["success"]:
-            return f"d100={roll_val} ≤ 技能{effective} → 成功"
-        else:
-            return f"d100={roll_val} > 技能{effective} → 失败"
-
-    def _tool_combat_attack(self, params: dict) -> str:
-        """Execute combat_attack tool."""
-        from trpg_agent.check import difficulty_check
-
-        target_name = params.get("target", "")
-        if not target_name:
-            return "错误: 未指定攻击目标"
-
-        # Find target NPC — exact match only
-        target_npc = self.npc_store.find_by_name(target_name)
-
-        if target_npc is None:
-            return f"错误: 场景中找不到 NPC「{target_name}」"
-
-        # Track in scene NPCs
-        if target_name not in self.scene_npcs:
-            self.scene_npcs.append(target_name)
-
-        # Attack roll
-        attack_result = difficulty_check(dc=12)
-        roll_val = attack_result["roll"]
-
-        if not attack_result["success"]:
-            # Counter-attack
-            from trpg_agent.dice import roll as dice_roll
-
-            _, counter_dmg = dice_roll("1d6")
-            self.player_state.take_damage(counter_dmg)
-            ps = self.player_state.get_state()
-            return (
-                f"d20={roll_val} < DC12 → 攻击落空｜"
-                f"对方反击(d6={counter_dmg})，你受到{counter_dmg}点伤害 "
-                f"(HP {ps['hp']}/{ps['max_hp']})"
-            )
-
-        # Hit — calculate damage
-        attacker_attrs = getattr(self.player, "attributes", {})
-        str_bonus = max(0, (attacker_attrs.get("力量", 10) - 10) // 2)
-        from trpg_agent.dice import roll as dice_roll
-
-        _, dmg_roll = dice_roll("1d6")
-        damage = dmg_roll + str_bonus
-
-        # Apply to defender
-        npc_state = self.npc_store.get_state(target_name)
-        if npc_state is None:
-            npc_state = StateMachine(max_hp=calc_max_hp(target_npc.attributes))
-            self.npc_store._states[target_name] = npc_state
-
-        def_status = npc_state.take_damage(damage)
-        def_hp = f"{npc_state.hp}/{npc_state.max_hp}"
-
-        result = f"d20={roll_val} ≥ DC12 → 命中（d6={dmg_roll}+{str_bonus}={damage}点伤害, {target_name} HP {def_hp}）"
-        if def_status == "dead":
-            result += f" —— {target_name}倒下！"
-            if target_name in self.scene_npcs:
-                self.scene_npcs.remove(target_name)
-
-        # NPC state change
-        npc_state.apply("threatened")
-        self.npc_store.save_state(target_name)
-
-        return result
-
-    def _tool_get_player_state(self, params: dict) -> str:
-        """Execute get_player_state tool."""
-        ps = self.player_state.get_state()
-        return (
-            f"HP {ps['hp']}/{ps['max_hp']} | "
-            f"情绪 {ps['emotion']} | "
-            f"信任 {ps['trust']} | "
-            f"体力 {ps['stamina']}"
-        )
-
-    def _tool_get_npc_state(self, params: dict) -> str:
-        """Execute get_npc_state tool."""
-        name = params.get("name", "")
-        if not name:
-            return "错误: 未指定 NPC 名称"
-
-        npc = self.npc_store.find_by_name(name)
-        if npc is None:
-            return f"场景中找不到 NPC「{name}」"
-
-        npc_state = self.npc_store.get_state(name)
-        if npc_state is None:
-            return f"{name}: 无状态记录"
-
-        ns = npc_state.get_state()
-        return (
-            f"{name}: HP {ns['hp']}/{ns['max_hp']} | "
-            f"情绪 {ns['emotion']} | "
-            f"信任 {ns['trust']} | "
-            f"体力 {ns['stamina']} | "
-            f"存活: {'是' if ns['alive'] else '否'}"
-        )
-
-    def _tool_create_npc(self, params: dict) -> str:
-        """Execute create_npc tool — requires name, core, and personality_tone."""
-        import re
-
-        name = params.get("name", "").strip()
-        core = params.get("core", [])
-        personality_tone = params.get("personality_tone", "").strip()
-
-        # Validate name: non-empty, contains at least one letter or CJK character
-        if not name:
-            return "错误: NPC 名称不能为空"
-        if not re.search(r"[a-zA-Z一-鿿]", name):
-            return f"错误: NPC 名称「{name}」需包含有效字符（中文或字母）"
-
-        # Validate core: at least one non-empty background line
-        if not isinstance(core, list):
-            core = [core] if core else []
-        core = [c.strip() for c in core if c and c.strip()]
-        if not core:
-            return f"错误: 创建 NPC「{name}」需要至少一条角色背景 (core)"
-
-        # Validate personality_tone
-        if not personality_tone:
-            return f"错误: 创建 NPC「{name}」需要指定说话语调 (personality_tone)"
-
-        existing = self.npc_store.find_by_name(name)
-        if existing is not None:
-            if name not in self.scene_npcs:
-                self.scene_npcs.append(name)
-            return f"NPC「{name}」已存在，已加入场景"
-
-        relations = params.get("relations", {})
-        if not isinstance(relations, dict):
-            relations = {}
-
-        # Generate attributes based on NPC role (LLM-driven)
-        attributes = self._generate_npc_attributes(name, core, personality_tone)
-
-        self.npc_store.create(
-            name=name,
-            core=core,
-            attributes=attributes,
-            personality={
-                "tone": personality_tone,
-                "verbal_tics": "无特殊语言习惯",
-                "emotion_map": {
-                    "calm": f"以{personality_tone}的态度说话",
-                    "wary": "警惕地观察",
-                    "hostile": "表现出敌意",
-                },
-            },
-            relations=relations,
-        )
-        if name not in self.scene_npcs:
-            self.scene_npcs.append(name)
-
-        core_summary = "；".join(core[:2])
-        return f"已创建 NPC「{name}」: {core_summary}（语调: {personality_tone}）"
-
-    def _tool_npc_speak(self, params: dict) -> str:
-        """Execute npc_speak tool — invoke NPC Agent for roleplay response."""
-        name = params.get("name", "")
-        if not name:
-            return "错误: 未指定 NPC 名称"
-
-        # Find NPC — exact match only, semantic search is too unreliable for identity
-        npc = self.npc_store.find_by_name(name)
-
-        if npc is None:
-            return f"场景中找不到 NPC「{name}」。请先使用 create_npc 创建。"
-
-        # Track in scene
-        if name not in self.scene_npcs:
-            self.scene_npcs.append(name)
-
-        # Build NPC Agent prompt
-        npc_state = self.npc_store.get_state(name)
-        npc_state_dict = (
-            npc_state.get_state()
-            if npc_state
-            else {"emotion": "calm", "trust": 0.5, "stamina": "fresh"}
-        )
-        npc_system = (
-            npc.build_personality_prompt()
-            + "\n\n"
-            + npc.build_state_prompt(npc_state_dict)
-        )
-
-        # Inject NPC relations
-        if npc.relations:
-            rel_lines = [f"- 与{k}的关系: {v}" for k, v in npc.relations.items()]
-            npc_system += "\n\n【人物关系】\n" + "\n".join(rel_lines)
-
-        # Use the most recent player input as context
-        user_input_for_npc = (
-            self._last_user_input if hasattr(self, "_last_user_input") else "..."
-        )
-
-        # Inject NPC-specific memories from dedicated NPC collection (semantic + graph)
-        try:
-            npc_memories = self.memory.npc_full_retrieve(name, user_input_for_npc, n=3)
-            if npc_memories:
-                npc_mem_text = "\n".join(
-                    f"- {m['content']} （{m.get('relation', '')}）" if m.get('relation')
-                    else f"- {m['content']}"
-                    for m in npc_memories
-                )
-                npc_system += (
-                    f"\n\n【与该玩家的过往交集（与当前情境最相关）】\n{npc_mem_text}"
-                )
-        except Exception as e:
-            self._debug(f"[DEBUG] NPC 记忆检索失败 ({name}): {e}")
-
-        # Build messages from NPC history + current player input
-        npc_messages = list(self.npc_store.get_history(name))
-
-        if self._llm_available and self.llm:
-            try:
-                npc_reply = self.llm.chat(system=npc_system, messages=npc_messages)
-            except Exception:
-                npc_reply = f"(NPC「{name}」暂时不可用)"
-        else:
-            npc_reply = f"(LLM 未连接)"
-
-        # Record in NPC history
-        self.npc_store.append_history(
-            name, "user", f"{self.player.name}: {user_input_for_npc}"
-        )
-        self.npc_store.append_history(name, "assistant", npc_reply)
-
-        # Persist NPC state
-        self.npc_store.save_state(name)
-
-        return f'{name}: "{npc_reply}"'
-
-    def _tool_remove_npc(self, params: dict) -> str:
-        """Execute remove_npc tool — remove NPC from current scene."""
-        name = params.get("name", "").strip()
-        if not name:
-            return "错误: 未指定 NPC 名称"
-        if name in self.scene_npcs:
-            self.scene_npcs.remove(name)
-            return f"NPC「{name}」已从当前场景移除"
-        return f"NPC「{name}」不在当前场景中"
-
-    def _tool_set_scene(self, params: dict) -> str:
-        """Execute set_scene tool — update scene location, present NPCs, time, weather."""
-        changes = []
-
-        if "location" in params:
-            changes.append(f"场景: {params['location']}")
-
-        if "present_npcs" in params:
-            npc_list = params["present_npcs"]
-            if isinstance(npc_list, list):
-                self.scene_npcs = [n for n in npc_list if isinstance(n, str)]
-                changes.append(f"在场NPC: {', '.join(self.scene_npcs)}")
-
-        if "time_of_day" in params:
-            self._time_of_day = params["time_of_day"]
-            changes.append(f"时间: {self._time_of_day}")
-
-        if "weather" in params:
-            self._weather = params["weather"]
-            changes.append(f"天气: {self._weather}")
-
-        if not changes:
-            return "场景未变更"
-        return "｜".join(changes)
-
-    def _tool_game_over(self, params: dict) -> str:
-        """Execute game_over tool — character died. Full reset."""
-        cause = params.get("cause", "未知原因")
-        self._game_over = True
-
-        # Delete save file
-        if os.path.exists("data/save.json"):
-            os.remove("data/save.json")
-
-        # Clear NPC state files
-        import glob
-        for f in glob.glob("data/chroma/npcs/*_state.json"):
-            try:
-                os.remove(f)
-            except Exception:
-                pass
-
-        # Clear run-time state
-        self.scene_npcs.clear()
-        self._recent_events.clear()
-        self._last_gm_response = ""
-        self._time_of_day = "黄昏"
-        self._weather = "阴"
-
-        # Clear all memory collections (get all IDs then delete)
-        try:
-            all_ids = self.memory._collection.get()["ids"]
-            if all_ids:
-                self.memory._collection.delete(ids=all_ids)
-        except Exception:
-            pass
-        try:
-            all_npc_ids = self.memory._npc_collection.get()["ids"]
-            if all_npc_ids:
-                self.memory._npc_collection.delete(ids=all_npc_ids)
-        except Exception:
-            pass
-
-        return f"游戏结束: {cause}"
-
-    def _tool_search_knowledge(self, params: dict) -> str:
-        """Execute search_knowledge tool."""
-        query = params.get("query", "")
-        if not query:
-            return "错误: 未指定搜索查询"
-        results = self.knowledge.query(query, self.player.name)
-        if not results:
-            return f"未找到与「{query}」相关的知识"
-        return "\n".join(f"- {r}" for r in results[:3])
-
-    def _tool_search_memory(self, params: dict) -> str:
-        """Execute search_memory tool."""
-        query = params.get("query", "")
-        if not query:
-            return "错误: 未指定搜索查询"
-        memories = self.memory.search(query, n=5)
-        if not memories:
-            return f"未找到与「{query}」相关的记忆"
-        return "\n".join(f"- {m['content']}" for m in memories[:5])
-
-    # ------------------------------------------------------------------
-    #  Tool dispatcher
-    # ------------------------------------------------------------------
-
-    def _execute_tool(self, tool_name: str, params: dict) -> str:
-        """Dispatch a tool call to the appropriate handler method.
-
-        Returns a human-readable result string.
-        """
-        method_name = _TOOL_REGISTRY.get(tool_name)
-        if method_name is None:
-            return f"未知工具: {tool_name}"
-
-        handler = getattr(self, method_name, None)
-        if handler is None:
-            return f"工具未实现: {tool_name}"
-
-        try:
-            return handler(params)
-        except Exception as e:
-            return f"工具执行错误 ({tool_name}): {e}"
-
-    # ------------------------------------------------------------------
-    #  Context builder & response renderer
+    #  Context builder
     # ------------------------------------------------------------------
 
     def _run_tool_advisor(self, user_input: str) -> str:
@@ -1201,182 +566,6 @@ class GameMaster:
                 except Exception as e:
                     self._debug(f"[DEBUG] NPC Agent 创建失败 ({name}): {e}")
 
-    def _build_gm_context(self, user_input: str) -> tuple[str, list[dict]]:
-        """Build the system prompt and user message for the GM Agent.
-
-        Returns (system_prompt, messages_list).
-        """
-        # -- System prompt --
-        player_card = self.player.summary()
-        scene_npcs_text = "暂无已知 NPC"
-        if self.scene_npcs:
-            scene_npcs_text = ", ".join(self.scene_npcs)
-
-        # -- World setting from config or custom --
-        world_setting = self.world.get("description", self.world.get("name", "未知世界"))
-
-        system_prompt = (
-            _GM_SYSTEM_PROMPT.replace("{world_setting}", world_setting)
-            .replace("{player_name}", self.player.name)
-            .replace("{time_of_day}", self._time_of_day)
-            .replace("{weather}", self._weather)
-            .replace("{scene_npcs}", scene_npcs_text)
-            .replace("{player_card}", player_card)
-        )
-
-        # -- Memories (LLM-generated query for better semantic matching) --
-        enriched_query = ""
-        if self._llm_available:
-            context = ""
-            if self.scene_npcs:
-                context = "当前场景NPC：" + ", ".join(self.scene_npcs)
-            enriched_query = self.llm.generate_search_query(user_input, context)
-
-        # fallback: LLM unavailable or returned empty
-        if not enriched_query:
-            enriched_query = user_input
-            if self.scene_npcs:
-                enriched_query += " " + " ".join(self.scene_npcs[:3])
-
-        # Questions about past events: skip recent bias to avoid echo chamber
-        is_retrospective = any(kw in user_input for kw in ["之前", "发生了", "还记得", "上次", "过去", "以前", "那天"])
-        if self._recent_events and not is_retrospective:
-            enriched_query += " " + " ".join(list(self._recent_events)[-1:])
-
-        memories = self.memory.full_retrieve(enriched_query)
-        memories = [m for m in memories if m.get("type", "") != "npc_dialogue"]
-
-        # -- Merge: graph results first, then non-overlapping recent events --
-        memory_lines: list = []
-        seen_prefixes: set = set()
-        for m in memories[:5]:
-            content = m["content"]
-            rel = m.get("relation", "")
-            if rel:
-                memory_lines.append(f"- {content} （{rel}）")
-            else:
-                memory_lines.append(f"- {content}")
-            seen_prefixes.add(content[:20])
-
-        if self._recent_events:
-            for text in list(self._recent_events)[-5:]:
-                if text and text[:20] not in seen_prefixes:
-                    memory_lines.append(f"- {text}")
-                    seen_prefixes.add(text[:20])
-                    if len(memory_lines) >= 8:
-                        break
-
-        memory_text = "## 记忆\n" + "\n".join(memory_lines) if memory_lines else ""
-
-        if self.debug:
-            lines = [
-                f"[DEBUG] 记忆检索(query='{enriched_query[:60]}...'): {len(memories)}条 (合并后{len(memory_lines)}条)"
-            ]
-            for line in memory_lines[:3]:
-                lines.append(f"  {line[:80]}")
-            self._debug("\n".join(lines))
-
-        knowledge = self.knowledge.query(user_input, self.player.name)
-        knowledge_text = ""
-        if knowledge:
-            knowledge_text = "## 世界知识\n" + "\n".join(
-                f"- {k}" for k in knowledge[:3]
-            )
-        self._debug(f"[DEBUG] 知识检索: {len(knowledge)}条")
-
-        # -- Assemble user message --
-        user_message_parts = []
-        for section in [memory_text, knowledge_text]:
-            if section:
-                user_message_parts.append(section)
-
-        # Inject previous GM response so the LLM knows what suggestions were offered
-        if self._last_gm_response:
-            user_message_parts.append(
-                f"## 上一轮 GM 回应（玩家回复中的数字对应此建议列表的编号）\n"
-                f"{self._last_gm_response}"
-            )
-
-        user_message_parts.append(f"玩家行动: {user_input}")
-        user_message_parts.append(
-            "请以 JSON 格式回复（统一格式，始终使用此结构）:\n"
-            "{\n"
-            '  "thinking": "你的内心独白：分析玩家意图、判断是否需要检定、为什么选择这些工具（1-2句话）",\n'
-            '  "narration": "场景叙述（不超过150字）。每次叙述推动剧情：NPC说了什么、做了什么、环境发生了具体什么变化。氛围描写1句足够，不要反复描述煤气灯/雾气/不安感",\n'
-            '  "tool_calls": [\n'
-            '    {"tool": "工具名", "params": {...}}\n'
-            "  ],\n"
-            '  "involved_npcs": ["本轮互动涉及到的NPC名称（无则[]）"],\n'
-            '  "persist_memory": true,\n'
-            '  "suggestions": ["建议1", "建议2", "建议3"]\n'
-            "}\n\n"
-            "关键时刻设 persist_memory 为 true（剧情推进、战斗、发现线索、位置移动等改变世界状态的事件）。纯闲聊或观察无变化时设为 false。suggestions 始终提供3个。"
-        )
-
-        user_message = "\n".join(user_message_parts)
-        messages = [{"role": "user", "content": user_message}]
-
-        return system_prompt, messages
-
-    @staticmethod
-    def _render_response(gm_json: dict) -> str:
-        """Convert GM JSON response to player-visible text."""
-        narration = gm_json.get("narration", "")
-        suggestions = gm_json.get("suggestions", [])
-
-        parts = [narration]
-        if suggestions:
-            parts.append("")
-            for i, s in enumerate(suggestions, 1):
-                parts.append(f"{i}. {s}")
-        return "\n".join(parts)
-
-    @staticmethod
-    def _sanitize_narration(text: str) -> str:
-        """Strip LLM-generated check results from narration text.
-
-        System-generated check results are appended separately; the LLM
-        must not include fake ones in its narration.
-        """
-        import re
-
-        # Remove parenthesized blocks containing dice/check patterns
-        text = re.sub(r"（[^）]*d(?:20|100|6)\s*[=>=≤≥].*?）", "", text)
-        text = re.sub(r"（[^）]*检定[^）]*）", "", text)
-        # Collapse multiple spaces and strip
-        text = re.sub(r"\s{2,}", " ", text).strip()
-        return text
-
-    @staticmethod
-    def _render_accumulated(all_narrations: List[str], suggestions: List[str]) -> str:
-        """Render accumulated narrations (including check results) + suggestions."""
-        parts = list(all_narrations)
-        if suggestions:
-            parts.append("")
-            for i, s in enumerate(suggestions, 1):
-                # Strip leading numbers from LLM-generated suggestions to avoid "1. 1."
-                cleaned = s.lstrip()
-                import re
-                cleaned = re.sub(r'^\d+\.\s*', '', cleaned)
-                if cleaned:
-                    parts.append(f"{i}. {cleaned}")
-        return "\n\n".join(parts)
-
-    # Tools whose results are shown as visible check lines
-    _CHECK_TOOLS = {"roll_dice", "difficulty_check", "skill_check", "combat_attack"}
-
-    @staticmethod
-    def _format_check_result(tool_name: str, result: str) -> str | None:
-        """Extract a player-visible check line from a tool result.
-
-        Returns None for tools that don't produce visible checks (e.g. npc_speak, search).
-        """
-        if tool_name not in GameMaster._CHECK_TOOLS:
-            return None
-
-        # Return the result string directly — it's already a concise check description
-        return result
-
     # ===================================================================
     #  Public API
     # ===================================================================
@@ -1401,6 +590,8 @@ class GameMaster:
             return "请说点什么吧。"
 
         self._last_user_input = user_input
+        from trpg_agent.tools import clear_tool_cache
+        clear_tool_cache()
 
         # ---- Command routing: world builder ---- (kept as-is)
         if self.world_builder and user_input.startswith("!"):
@@ -1500,7 +691,7 @@ class GameMaster:
         # ---- Debug: aggregate tool-level entries ----
         if self.debug:
             self._debug(f"[GM] Runner 完成  |  耗时 {elapsed_ms}ms  |  输出 {len(response)}字符  |  "
-                        f"输入 {len(input_text)}字符(~{len(input_text)//2}tok)")
+                        f"输入 {len(input_text)}字符(~{self._estimate_tokens(input_text)}tok)")
             for entry in game_ctx.debug_log:
                 self._debug(entry)
 
@@ -1568,6 +759,9 @@ class GameMaster:
                 response = self._narrate_world_builder_result(world_result, user_input)
                 yield response
                 return
+
+        from trpg_agent.tools import clear_tool_cache
+        clear_tool_cache()
 
         self._debug(f"\n{'─'*50}\n[GM] 玩家: {user_input}")
 
@@ -1699,7 +893,7 @@ class GameMaster:
         if self.debug:
             self._debug(f"[GM] Runner 完成  |  耗时 {elapsed_ms}ms  |  "
                         f"输出 {len(full_response)}字符  |  "
-                        f"输入 {len(input_text)}字符(~{len(input_text)//2}tok)")
+                        f"输入 {len(input_text)}字符(~{self._estimate_tokens(input_text)}tok)")
             for entry in game_ctx.debug_log:
                 self._debug(entry)
 

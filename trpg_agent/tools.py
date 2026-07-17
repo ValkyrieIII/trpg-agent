@@ -6,6 +6,7 @@ Phase 2: invoke_npc routes to real NPC Agents with autonomous decision-making.
 """
 
 import os
+import asyncio
 import glob
 import re
 import time
@@ -18,6 +19,36 @@ from trpg_agent.state import StateMachine, calc_max_hp
 
 # Import GameContext for type hinting (avoid circular import)
 from trpg_agent.agent_config import GameContext
+
+
+# ---------------------------------------------------------------------------
+# Tool result cache (in-memory, per-turn TTL)
+# ---------------------------------------------------------------------------
+
+_tool_cache: dict[str, tuple[float, str]] = {}
+_TOOL_CACHE_TTL: float = 30.0  # seconds
+
+
+def _cached(tool_name: str, cache_key: str, producer) -> str:
+    """Get-or-compute with TTL cache for idempotent tool results."""
+    full_key = f"{tool_name}:{cache_key}"
+    now = time.time()
+    cached = _tool_cache.get(full_key)
+    if cached and (now - cached[0]) < _TOOL_CACHE_TTL:
+        return cached[1]
+    result = producer()
+    _tool_cache[full_key] = (now, result)
+    # Prevent unbounded growth — evict oldest half if over limit
+    if len(_tool_cache) > 100:
+        sorted_keys = sorted(_tool_cache.keys(), key=lambda k: _tool_cache[k][0])
+        for k in sorted_keys[:50]:
+            del _tool_cache[k]
+    return result
+
+
+def clear_tool_cache() -> None:
+    """Clear the tool result cache. Call at the start of each turn."""
+    _tool_cache.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -75,13 +106,15 @@ def skill_check(ctx: RunContextWrapper[GameContext], skill_name: str, modifier: 
 @function_tool
 def get_player_state(ctx: RunContextWrapper[GameContext]) -> str:
     """Query player HP/emotion/trust/stamina."""
-    ps = ctx.context.player_state.get_state()
-    return (
-        f"HP {ps['hp']}/{ps['max_hp']} | "
-        f"情绪 {ps['emotion']} | "
-        f"信任 {ps['trust']} | "
-        f"体力 {ps['stamina']}"
-    )
+    def _produce():
+        ps = ctx.context.player_state.get_state()
+        return (
+            f"HP {ps['hp']}/{ps['max_hp']} | "
+            f"情绪 {ps['emotion']} | "
+            f"信任 {ps['trust']} | "
+            f"体力 {ps['stamina']}"
+        )
+    return _cached("player_state", ctx.context.player_name, _produce)
 
 
 @function_tool
@@ -91,22 +124,24 @@ def get_npc_state(ctx: RunContextWrapper[GameContext], name: str) -> str:
     if not name:
         return "错误: 未指定 NPC 名称"
 
-    npc = game_ctx.npc_store.find_by_name(name)
-    if npc is None:
-        return f"场景中找不到 NPC「{name}」"
+    def _produce():
+        npc = game_ctx.npc_store.find_by_name(name)
+        if npc is None:
+            return f"场景中找不到 NPC「{name}」"
 
-    npc_state = game_ctx.npc_store.get_state(name)
-    if npc_state is None:
-        return f"{name}: 无状态记录"
+        npc_state = game_ctx.npc_store.get_state(name)
+        if npc_state is None:
+            return f"{name}: 无状态记录"
 
-    ns = npc_state.get_state()
-    return (
-        f"{name}: HP {ns['hp']}/{ns['max_hp']} | "
-        f"情绪 {ns['emotion']} | "
-        f"信任 {ns['trust']} | "
-        f"体力 {ns['stamina']} | "
-        f"存活: {'是' if ns['alive'] else '否'}"
-    )
+        ns = npc_state.get_state()
+        return (
+            f"{name}: HP {ns['hp']}/{ns['max_hp']} | "
+            f"情绪 {ns['emotion']} | "
+            f"信任 {ns['trust']} | "
+            f"体力 {ns['stamina']} | "
+            f"存活: {'是' if ns['alive'] else '否'}"
+        )
+    return _cached("npc_state", name, _produce)
 
 
 # ---------------------------------------------------------------------------
@@ -356,10 +391,12 @@ def search_knowledge(ctx: RunContextWrapper[GameContext], query: str) -> str:
     """Search world knowledge base."""
     if not query:
         return "错误: 未指定搜索查询"
-    results = ctx.context.knowledge.query(query, ctx.context.player_name)
-    if not results:
-        return f"未找到与「{query}」相关的知识"
-    return "\n".join(f"- {r}" for r in results[:3])
+    def _produce():
+        results = ctx.context.knowledge.query(query, ctx.context.player_name)
+        if not results:
+            return f"未找到与「{query}」相关的知识"
+        return "\n".join(f"- {r}" for r in results[:3])
+    return _cached("knowledge", query, _produce)
 
 
 @function_tool
@@ -372,37 +409,39 @@ def search_memory(ctx: RunContextWrapper[GameContext], query: str) -> str:
     if not query:
         return "错误: 未指定搜索查询"
 
-    game_ctx = ctx.context
-    lines: list[str] = []
-    seen: set[str] = set()
+    def _produce():
+        game_ctx = ctx.context
+        lines: list[str] = []
+        seen: set[str] = set()
 
-    # 1. Fast path: recent_events in-memory match
-    if game_ctx.recent_events:
-        query_lower = query.lower()
-        for event in game_ctx.recent_events:
-            if len(lines) >= 3:
+        # 1. Fast path: recent_events in-memory match
+        if game_ctx.recent_events:
+            query_lower = query.lower()
+            for event in game_ctx.recent_events:
+                if len(lines) >= 3:
+                    break
+                if any(word in event for word in query_lower.split() if len(word) >= 2):
+                    if event[:20] not in seen:
+                        lines.append(f"- {event}")
+                        seen.add(event[:20])
+
+        # 2. Deep path: ChromaDB semantic + graph
+        memories = game_ctx.memory.full_retrieve(query)
+        for m in memories:
+            if len(lines) >= 6:
                 break
-            # Simple substring match — fast, no embedding cost
-            if any(word in event for word in query_lower.split() if len(word) >= 2):
-                if event[:20] not in seen:
-                    lines.append(f"- {event}")
-                    seen.add(event[:20])
+            if m.get("type", "") == "npc_dialogue":
+                continue
+            content = m["content"]
+            if content[:20] not in seen:
+                lines.append(f"- {content}")
+                seen.add(content[:20])
 
-    # 2. Deep path: ChromaDB semantic + graph
-    memories = game_ctx.memory.full_retrieve(query)
-    for m in memories:
-        if len(lines) >= 6:
-            break
-        if m.get("type", "") == "npc_dialogue":
-            continue
-        content = m["content"]
-        if content[:20] not in seen:
-            lines.append(f"- {content}")
-            seen.add(content[:20])
+        if not lines:
+            return f"未找到与「{query}」相关的记忆"
+        return "\n".join(lines)
 
-    if not lines:
-        return f"未找到与「{query}」相关的记忆"
-    return "\n".join(lines)
+    return _cached("memory", query, _produce)
 
 
 # ---------------------------------------------------------------------------
@@ -523,6 +562,65 @@ async def invoke_npc(ctx: RunContextWrapper[GameContext], name: str, prompt: str
     game_ctx.npc_store.save_state(name)
 
     return f'{name}: "{npc_reply}"'
+
+
+# ---------------------------------------------------------------------------
+# Parallel NPC invocation — invoke multiple NPCs concurrently
+# ---------------------------------------------------------------------------
+
+@function_tool
+async def invoke_npcs(
+    ctx: RunContextWrapper[GameContext],
+    npc_calls: str,
+) -> str:
+    """Invoke multiple NPCs in parallel for group conversations.
+
+    Use when the player addresses multiple NPCs at once, or when a scene
+    involving several characters simultaneously. More efficient than
+    calling invoke_npc multiple times sequentially.
+
+    Args:
+        npc_calls: JSON array string of {{"name": "...", "prompt": "..."}} objects.
+            Example: '[{{"name": "Alice", "prompt": "What do you know?"}},
+                       {{"name": "Bob", "prompt": "And you?"}}]'
+    """
+    import json as _json
+
+    game_ctx = ctx.context
+
+    try:
+        calls = _json.loads(npc_calls)
+    except (_json.JSONDecodeError, TypeError):
+        return "错误: npc_calls 必须是有效的 JSON 数组 [{\"name\": ..., \"prompt\": ...}]"
+
+    if not isinstance(calls, list) or not calls:
+        return "错误: npc_calls 必须是非空数组"
+
+    async def _call_one(npc_call: dict) -> str:
+        """Call invoke_npc for a single NPC, with exception isolation."""
+        name = npc_call.get("name", "")
+        prompt = npc_call.get("prompt", "")
+        if not name or not prompt:
+            return f'{npc_call.get("name", "?")}: "(缺少 name 或 prompt)"'
+        try:
+            return await invoke_npc(ctx, name, prompt)
+        except Exception as e:
+            if game_ctx.debug:
+                game_ctx.debug_log.append(f"[NPC] {name} 并行调用失败: {e}")
+            return f'{name}: "(NPC暂时不可用)"'
+
+    tasks = [_call_one(call) for call in calls]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    lines: list[str] = []
+    for i, result in enumerate(results):
+        if isinstance(result, Exception):
+            name = calls[i].get("name", "?") if i < len(calls) else "?"
+            lines.append(f'{name}: "(NPC暂时不可用)"')
+        else:
+            lines.append(str(result))
+
+    return "\n\n".join(lines)
 
 
 # ---------------------------------------------------------------------------

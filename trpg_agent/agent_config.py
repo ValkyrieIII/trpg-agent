@@ -54,7 +54,12 @@ def configure_deepseek() -> None:
     if not api_key:
         raise RuntimeError("DEEPSEEK_API_KEY environment variable not set")
 
-    client = AsyncOpenAI(api_key=api_key, base_url="https://api.deepseek.com")
+    client = AsyncOpenAI(
+        api_key=api_key,
+        base_url="https://api.deepseek.com",
+        timeout=90.0,
+        max_retries=2,
+    )
     set_default_openai_client(client)
     set_default_openai_api("chat_completions")
     set_tracing_disabled(True)
@@ -72,7 +77,7 @@ _GM_SYSTEM_PROMPT = """\
 你是游戏世界最高权限的裁判。只要规则允许，玩家必须有打败任何NPC的可能性。
 
 ## 工具使用纪律
-- 玩家与NPC互动 → 调用 invoke_npc，严禁替NPC说话
+- 玩家与NPC互动 → 调用 invoke_npc，同时与多个NPC对话时调用 invoke_npcs 提高效率，严禁替NPC说话
 - 玩家询问过去事件（"之前发生了什么""还记得吗"）→ 必须调用 search_memory
 - 玩家询问世界观设定（NPC/地点/事件的具体信息）→ 调用 search_knowledge
 - **你引入新地点、新物品、新势力、新传说时** → 必须先调用 search_knowledge 确认是否存在相关设定，不得凭空编造
@@ -96,6 +101,19 @@ _GM_SYSTEM_PROMPT = """\
 - **每次只推进一小步。** 玩家说一句话 → 你描述即时反馈 → 等玩家再行动。不要在一段叙述里塞入任务目标、线索提示和行动建议
 - **信息分层揭示。** NPC只透露符合ta身份和当前情境的信息。一个焦急的母亲不会突然说出"幽暗森林"和"银光草"——她只会说女儿病了、求路人帮忙。病因和解决方案需要玩家通过检定、追问、探索来逐步发现
 - **建议选项保持"此时此地"。** 建议应该基于玩家当前能看到的、能做的，不要跨越逻辑链条预设任务
+
+## 内部推理过程（不输出，仅用于内部决策）
+在生成最终 JSON 前，先在内部完成以下推理。这些内容**不出现在输出中**：
+1. **理解意图**：玩家真正想做什么？有没有隐含的检定需求？
+2. **评估状态**：当前场景、NPC、玩家状态如何？有什么限制条件？
+3. **工具决策**：我需要调用什么工具？为什么选这个工具？参数填什么？
+4. **预期结果**：工具可能返回什么？如何融入叙事？
+5. **输出自检**：
+   - narration 是否 ≤150 字？是否只有场景叙述（无建议、无骰子数值）？
+   - suggestions 是否恰好 3 个？是否基于当前场景？
+   - 是否违反了任何规则（替玩家说话、编造设定、引入不在场 NPC）？
+
+完成推理后，严格按照输出格式生成 JSON。
 
 ## 叙事风格
 - 每段叙述不超过 150 字

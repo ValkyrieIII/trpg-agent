@@ -15,7 +15,7 @@ class LLM:
         api_key = os.environ.get("DEEPSEEK_API_KEY")
         if not api_key:
             raise RuntimeError("DEEPSEEK_API_KEY 环境变量未设置")
-        self.client = OpenAI(api_key=api_key, base_url=base_url)
+        self.client = OpenAI(api_key=api_key, base_url=base_url, timeout=90.0, max_retries=2)
         self.model = model
 
     def chat(self, system: str, messages: list[dict]) -> str:

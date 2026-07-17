@@ -49,6 +49,7 @@ TOOL_DISPLAY_NAMES: dict[str, str] = {
     "get_npc_state":        "查询NPC",
     "create_npc":           "创建NPC",
     "invoke_npc":           "NPC对话",
+    "invoke_npcs":          "批量NPC对话",
     "remove_npc":           "移除NPC",
     "set_scene":            "场景设定",
     "game_over":            "游戏结束",
