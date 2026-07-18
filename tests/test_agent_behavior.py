@@ -378,3 +378,102 @@ class TestGameContext:
         from trpg_agent.tools import clear_tool_cache, _cached
         assert callable(clear_tool_cache)
         assert callable(_cached)
+
+
+# ===================================================================
+# Multi-agent prompt tests
+# ===================================================================
+
+
+class TestJudgePrompt:
+    """Verify the Judge Agent prompt is well-formed."""
+
+    def test_judge_prompt_contains_required_sections(self):
+        from trpg_agent.judge import JUDGE_SYSTEM_PROMPT
+        assert "检定工具选择规则" in JUDGE_SYSTEM_PROMPT
+        assert "DC 参考" in JUDGE_SYSTEM_PROMPT
+        assert "修正值参考" in JUDGE_SYSTEM_PROMPT
+        assert "无需检定" in JUDGE_SYSTEM_PROMPT
+
+    def test_judge_agent_created_with_correct_name(self):
+        from trpg_agent.judge import create_judge_agent
+        agent = create_judge_agent()
+        assert agent.name == "Judge"
+
+    def test_judge_input_builder_includes_required_fields(self):
+        from trpg_agent.judge import build_judge_input
+        result = build_judge_input(
+            player_action="我爬墙",
+            player_name="冒险者",
+            player_skills=[{"name": "攀爬", "value": 60}],
+            player_attributes={"力量": 14, "敏捷": 12},
+            scene_context="酒馆外",
+            hp_info="HP 12/12",
+        )
+        assert "冒险者" in result
+        assert "爬墙" in result
+
+
+class TestNarratorPrompt:
+    def test_narrator_prompt_requires_json_output(self):
+        from trpg_agent.narrator import NARRATOR_SYSTEM_PROMPT
+        assert "narration" in NARRATOR_SYSTEM_PROMPT
+        assert "suggestions" in NARRATOR_SYSTEM_PROMPT
+
+    def test_narrator_has_no_tools(self):
+        from trpg_agent.narrator import create_narrator_agent
+        agent = create_narrator_agent()
+        assert agent.tools == []
+
+    def test_narrator_input_builder_collects_results(self):
+        from trpg_agent.narrator import build_narrator_input
+        result = build_narrator_input(
+            player_action="进门",
+            player_name="冒险者",
+            scene_context="酒馆",
+            check_results="d20=15 成功",
+            npc_responses='酒保: "欢迎！"',
+            knowledge_results="酒馆的历史",
+        )
+        assert "冒险者" in result
+        assert "d20=15" in result
+        assert "酒保" in result
+
+
+class TestOrchestratorPrompt:
+    def test_orchestrator_prompt_focuses_on_routing(self):
+        from trpg_agent.orchestrator import ORCHESTRATOR_SYSTEM_PROMPT
+        assert "路由规则" in ORCHESTRATOR_SYSTEM_PROMPT
+        assert "invoke_judge" in ORCHESTRATOR_SYSTEM_PROMPT
+        assert "invoke_narrator" in ORCHESTRATOR_SYSTEM_PROMPT
+
+    def test_orchestrator_agent_created(self):
+        from trpg_agent.orchestrator import create_orchestrator_agent
+        agent = create_orchestrator_agent(tools=[])
+        assert agent.name == "Orchestrator"
+
+
+class TestNPCEventInputs:
+    def test_event_input_includes_decision_prompt(self):
+        from trpg_agent.npc_agent import build_npc_event_input
+        result = build_npc_event_input(
+            event="玩家走进酒馆",
+            npc_name="酒保",
+            npc_state={"emotion": "calm", "stamina": "fresh", "hp": 10, "max_hp": 10},
+            scene="酒馆内部",
+        )
+        assert "酒保" in result
+        assert "玩家走进酒馆" in result
+        assert "<silent>" in result  # decision option
+
+    def test_tick_input_includes_time_passage(self):
+        from trpg_agent.npc_agent import build_npc_tick_input
+        result = build_npc_tick_input(
+            npc_name="门卫",
+            npc_state={"emotion": "wary", "stamina": "tired", "hp": 8, "max_hp": 12},
+            scene="门口",
+            turns_since_last_action=3,
+        )
+        assert "门卫" in result
+        assert "时间流逝" in result
+        assert "3 个回合" in result

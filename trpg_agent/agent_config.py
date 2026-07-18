@@ -33,6 +33,8 @@ class GameContext:
     player_skills: list[dict[str, Any]] = field(default_factory=list)  # [{name, value}, ...]
     player_attributes: dict[str, int] = field(default_factory=dict)    # {力量, 敏捷, ...}
     npc_agents: dict[str, Any] = field(default_factory=dict)   # NPC name → Agent (Phase 2)
+    judge_agent: Any = None     # Judge Agent instance (set by GameMaster)
+    narrator_agent: Any = None  # Narrator Agent instance (set by GameMaster)
     history_messages: list[dict[str, str]] = field(default_factory=list)
     llm: Any = None            # legacy LLM instance (for Phase 1 fallback)
     game_over: bool = False    # mutable flag — game truly ended (after confirmation)

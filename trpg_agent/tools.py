@@ -653,6 +653,175 @@ async def invoke_npcs(
 
 
 # ---------------------------------------------------------------------------
+# Sub-agent invocation tools (Orchestrator → Judge / Narrator)
+# ---------------------------------------------------------------------------
+
+
+@function_tool
+async def invoke_judge(
+    ctx: RunContextWrapper[GameContext],
+    action_description: str,
+) -> str:
+    """Invoke the Judge Agent to determine if a check is needed and execute it.
+
+    The Judge handles all game-mechanics decisions: DC selection, skill checks,
+    combat attacks, dice rolling.  It NEVER writes narrative.
+
+    Args:
+        action_description: What the player is trying to do (natural language).
+    """
+    game_ctx = ctx.context
+    judge = getattr(game_ctx, 'judge_agent', None)
+    if judge is None:
+        return "Judge Agent 未初始化"
+
+    # Build minimal input for Judge
+    state = game_ctx.player_state.get_state() if game_ctx.player_state else {}
+    scene = (
+        f"时间: {game_ctx.time_of_day}, 天气: {game_ctx.weather}, "
+        f"场景NPC: {', '.join(game_ctx.scene_npcs) or '无'}"
+    )
+    input_text = (
+        f"## 场景\n{scene}\n\n"
+        f"## 玩家\nHP {state.get('hp', '?')}/{state.get('max_hp', '?')}\n\n"
+        f"## 玩家行动\n{action_description}\n\n"
+        f"请判断这个行动是否需要检定，如果需要，执行对应的检定工具。"
+    )
+
+    try:
+        result = await Runner.run(judge, input=input_text, max_turns=3)
+        return result.final_output
+    except Exception as e:
+        if game_ctx.debug:
+            game_ctx.debug_log.append(f"[Judge] 调用失败: {e}")
+        return f"Judge 错误: {e}"
+
+
+@function_tool
+async def invoke_narrator(
+    ctx: RunContextWrapper[GameContext],
+    all_results: str,
+) -> str:
+    """Invoke the Narrator Agent to write scene narration.
+
+    Call this LAST, after all other agents (Judge, NPCs, knowledge search)
+    have returned their results.  The Narrator produces the final JSON output.
+
+    Args:
+        all_results: All collected results from previous sub-agent calls,
+            formatted as a summary string.  Should include check results,
+            NPC responses, and knowledge results separated by newlines.
+    """
+    game_ctx = ctx.context
+    narrator = getattr(game_ctx, 'narrator_agent', None)
+    if narrator is None:
+        return "Narrator Agent 未初始化"
+
+    scene = (
+        f"时间: {game_ctx.time_of_day}, 天气: {game_ctx.weather}, "
+        f"场景NPC: {', '.join(game_ctx.scene_npcs) or '无'}"
+    )
+    input_text = (
+        f"## 当前场景\n{scene}\n\n"
+        f"## 所有结果\n{all_results}\n\n"
+        f"请基于以上信息，生成场景叙述和3个行动建议。"
+        f"严格按照 JSON 格式输出。"
+    )
+
+    try:
+        result = await Runner.run(narrator, input=input_text, max_turns=1)
+        return result.final_output
+    except Exception as e:
+        if game_ctx.debug:
+            game_ctx.debug_log.append(f"[Narrator] 调用失败: {e}")
+        # Fallback: return a simple narration
+        return (
+            '{"narration": "'
+            + all_results[:200].replace('"', "'").replace('\n', ' ')
+            + '", "suggestions": ["继续探索", "查看周围", "休息一会"]}'
+        )
+
+
+@function_tool
+async def broadcast_event(
+    ctx: RunContextWrapper[GameContext],
+    event: str,
+) -> str:
+    """Broadcast an event to all scene NPCs, letting each decide if they respond.
+
+    Unlike invoke_npc which demands a response, broadcast_event lets each NPC
+    independently choose whether to speak, act, or remain silent.
+
+    Use this for: scene changes, player actions that NPCs might notice,
+    ambient events that NPCs could react to.
+
+    Args:
+        event: Description of what happened (e.g. "玩家推开门走进酒馆",
+            "一场打斗在角落爆发", "有人在大喊救命").
+    """
+    game_ctx = ctx.context
+    npc_agents = getattr(game_ctx, 'npc_agents', {})
+    scene_npcs = game_ctx.scene_npcs
+
+    if not scene_npcs:
+        return ""
+
+    from trpg_agent.npc_agent import build_npc_event_input
+
+    async def _npc_decide(name: str) -> str | None:
+        agent = npc_agents.get(name)
+        if agent is None:
+            return None
+
+        # Get NPC state
+        npc_char = game_ctx.npc_store.find_by_name(name)
+        if npc_char is None:
+            return None
+
+        try:
+            npc_state = game_ctx.npc_store.get_state(name)
+            state_dict = npc_state.get_state() if npc_state else {"emotion": "calm", "stamina": "fresh"}
+        except Exception:
+            state_dict = {"emotion": "calm", "stamina": "fresh"}
+
+        scene = f"时间: {game_ctx.time_of_day}, 天气: {game_ctx.weather}"
+
+        # Build event input
+        npc_input = build_npc_event_input(
+            event=event,
+            npc_name=name,
+            npc_state=state_dict,
+            scene=scene,
+            memory=game_ctx.memory,
+        )
+
+        try:
+            result = await Runner.run(agent, input=npc_input, max_turns=3)
+            response = result.final_output.strip()
+            if response and response.lower() != "<silent>":
+                # Record in NPC history
+                game_ctx.npc_store.append_history(name, "user", f"[事件] {event}")
+                game_ctx.npc_store.append_history(name, "assistant", response)
+                game_ctx.npc_store.save_state(name)
+                return f'{name}: "{response}"'
+            return None
+        except Exception as e:
+            if game_ctx.debug:
+                game_ctx.debug_log.append(f"[Broadcast] {name} 失败: {e}")
+            return None
+
+    tasks = [_npc_decide(name) for name in scene_npcs]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    lines = []
+    for r in results:
+        if isinstance(r, str) and r:
+            lines.append(r)
+
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # invoke_npc helpers (Phase 1 + 2)
 # ---------------------------------------------------------------------------
 

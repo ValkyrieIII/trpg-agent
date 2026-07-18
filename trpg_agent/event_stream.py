@@ -55,6 +55,9 @@ TOOL_DISPLAY_NAMES: dict[str, str] = {
     "game_over":            "游戏结束",
     "search_knowledge":     "知识检索",
     "search_memory":        "记忆检索",
+    "invoke_judge":         "裁判判定",
+    "invoke_narrator":      "叙事生成",
+    "broadcast_event":      "广播事件",
 }
 
 

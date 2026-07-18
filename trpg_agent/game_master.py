@@ -183,6 +183,36 @@ class GameMaster:
         else:
             self.tool_advisor = None
 
+        # -- Multi-Agent: Judge + Narrator + Orchestrator (new architecture) --
+        self.legacy_mode: bool = os.environ.get("TRPG_LEGACY_MODE", "").lower() in ("1", "true", "yes")
+        self._judge_agent = None
+        self._narrator_agent = None
+        self._orchestrator_agent = None
+        if self._llm_available and not self.legacy_mode:
+            # Judge Agent
+            from trpg_agent.judge import create_judge_agent
+            self._judge_agent = create_judge_agent()
+            # Narrator Agent
+            from trpg_agent.narrator import create_narrator_agent
+            self._narrator_agent = create_narrator_agent()
+            # Orchestrator Agent — needs ALL tools including sub-agent callers
+            from trpg_agent.tools import (
+                roll_dice, difficulty_check, skill_check, combat_attack,
+                get_player_state, get_npc_state,
+                create_npc, invoke_npc, invoke_npcs, remove_npc, set_scene, game_over,
+                search_knowledge, search_memory,
+                invoke_judge, invoke_narrator, broadcast_event,
+            )
+            from trpg_agent.orchestrator import create_orchestrator_agent
+            self._orchestrator_agent = create_orchestrator_agent(tools=[
+                invoke_judge, invoke_narrator, broadcast_event,
+                invoke_npc, invoke_npcs,
+                search_memory, search_knowledge,
+                create_npc, remove_npc, set_scene,
+                get_player_state, get_npc_state, game_over,
+            ])
+            self._debug("[Agent] Orchestrator + Judge + Narrator 已就绪")
+
         # -- Sync NPC Agents for any NPCs already in the store (backstory, etc.) --
         if self._llm_available:
             self._sync_npc_agents()
@@ -518,6 +548,8 @@ class GameMaster:
             player_skills=self.player.skills,
             player_attributes=self.player.attributes,
             npc_agents=self._npc_agents,
+            judge_agent=self._judge_agent,
+            narrator_agent=self._narrator_agent,
             history_messages=[],  # don't pass — SDK may leak stale tool_calls to DeepSeek
             llm=self.llm,
             game_over=self._game_over,
@@ -571,6 +603,196 @@ class GameMaster:
                     self._debug(f"[DEBUG] NPC Agent 创建失败 ({name}): {e}")
 
     # ===================================================================
+    #  Multi-Agent process flow
+    # ===================================================================
+
+    def _process_multi_agent(self, user_input: str) -> str:
+        """New architecture: Orchestrator → (Judge + NPCs parallel) → Narrator.
+
+        The Orchestrator analyzes intent and routes to sub-agents via tools.
+        It NEVER writes narrative — it collects results and calls Narrator.
+        """
+        user_input = user_input.strip()
+        if not user_input:
+            return "请说点什么吧。"
+
+        self._last_user_input = user_input
+        from trpg_agent.tools import clear_tool_cache
+        clear_tool_cache()
+
+        # ---- Game over confirmation gate ----
+        if self._game_over_pending:
+            if user_input.lower() in ("/confirm", "确认"):
+                return self._confirm_game_over()
+            else:
+                return self._cancel_game_over()
+
+        # ---- Build context ----
+        scene_npcs_text = ", ".join(self.scene_npcs) if self.scene_npcs else "无"
+        self._debug(f"\n{'─'*50}\n[Orch] 玩家: {user_input}")
+        self._debug(f"[Orch] 场景: {scene_npcs_text}  |  {self._time_of_day}  ·  {self._weather}")
+
+        # Orchestrator input (lean — just state + history, no memory injection)
+        state = self.player_state.get_state()
+        scene_info = (
+            f"时间: {self._time_of_day}  天气: {self._weather}  场景NPC: {scene_npcs_text}\n"
+            f"HP {state['hp']}/{state['max_hp']}  情绪 {state['emotion']}  "
+            f"信任 {state['trust']}  体力 {state['stamina']}"
+        )
+        orch_input = (
+            f"## 当前状态\n{scene_info}\n\n"
+            f"## 玩家 {self.player.name}\n{user_input}"
+        )
+
+        # GameContext with sub-agents
+        game_ctx = self._build_game_context()
+
+        # Update Orchestrator instructions
+        self._orchestrator_agent.instructions = (
+            build_gm_instructions(  # reuse existing prompt builder for world/player info
+                world_setting=self.world.get("description", ""),
+                player_name=self.player.name,
+                player_card=self.player.summary(),
+                time_of_day=self._time_of_day,
+                weather=self._weather,
+                scene_npcs=scene_npcs_text,
+            )
+        )
+
+        # ---- Run Orchestrator ----
+        t0 = time.time()
+        try:
+            result = Runner.run_sync(
+                self._orchestrator_agent,
+                input=orch_input,
+                context=game_ctx,
+                max_turns=8,
+            )
+            response = result.final_output
+        except Exception as e:
+            self._debug(f"[Orch] Runner 失败: {e}")
+            return self._fallback_response(user_input)
+
+        elapsed_ms = int((time.time() - t0) * 1000)
+
+        # ---- Parse JSON output (from Narrator, relayed by Orchestrator) ----
+        self._last_suggestions = []
+        narration = response
+        try:
+            parsed = json.loads(response.strip())
+            if isinstance(parsed, dict):
+                narration = parsed.get("narration", response)
+                self._last_suggestions = parsed.get("suggestions", [])
+        except (json.JSONDecodeError, TypeError):
+            # Fallback: treat entire response as narration
+            narration = response
+
+        if self.debug:
+            self._debug(f"[Orch] 完成  |  耗时 {elapsed_ms}ms  |  输出 {len(response)}字符  |  "
+                        f"输入 ~{self._estimate_tokens(orch_input)}tok")
+            for entry in game_ctx.debug_log:
+                self._debug(entry)
+
+        # ---- History ----
+        self.history_messages.append({"role": "user", "content": user_input})
+        self.history_messages.append({"role": "assistant", "content": response})
+        self._trim_history()
+
+        # ---- State sync ----
+        self._time_of_day = game_ctx.time_of_day
+        self._weather = game_ctx.weather
+        self._game_over = game_ctx.game_over
+        self._game_over_pending = game_ctx.game_over_pending
+        self._game_over_cause = game_ctx.game_over_cause
+
+        # ---- Memory ----
+        if not self._game_over and narration:
+            try:
+                self._write_memory(user_input, narration, [])
+                for npc_name in game_ctx.scene_npcs:
+                    combined = (
+                        f"以下事件与{npc_name}相关，请从{npc_name}的视角提取记忆:\n"
+                        f"玩家: {user_input}\n事件: {narration[:300]}"
+                    )
+                    self._write_npc_memory(npc_name, combined)
+            except Exception as e:
+                self._debug(f"[DEBUG] 记忆写入失败: {e}")
+
+        # ---- Tick: NPC autonomous time-passage (every 3 turns) ----
+        self._turn_count += 1
+        if self._turn_count % 3 == 0 and self._orchestrator_agent is not None:
+            self._debug("[Orch] NPC tick...")
+            tick_text = self._run_npc_tick()
+            if tick_text and tick_text.strip():
+                narration += "\n\n" + tick_text
+
+        if self.debug:
+            state = self.player_state.get_state()
+            self._debug(
+                f"[状态] HP {state['hp']}/{state['max_hp']}  |  "
+                f"情绪 {state['emotion']}  |  信任 {state['trust']}  |  "
+                f"体力 {state['stamina']}  |  在场 {self.scene_npcs or '无'}"
+            )
+
+        self._last_gm_response = narration
+        return narration
+
+    def _run_npc_tick(self) -> str:
+        """Run autonomous tick for all scene NPCs. Returns narrative text or empty."""
+        if not self._npc_agents or not self.scene_npcs:
+            return ""
+
+        import asyncio as _asyncio
+        from trpg_agent.npc_agent import build_npc_tick_input
+
+        async def _tick_one(name: str) -> str | None:
+            agent = self._npc_agents.get(name)
+            if agent is None:
+                return None
+            npc_state = self.npc_store.get_state(name)
+            state_dict = npc_state.get_state() if npc_state else {
+                "emotion": "calm", "stamina": "fresh", "hp": "?", "max_hp": "?"
+            }
+            scene = f"时间: {self._time_of_day}, 天气: {self._weather}"
+            npc_input = build_npc_tick_input(
+                npc_name=name,
+                npc_state=state_dict,
+                scene=scene,
+                turns_since_last_action=3,
+                memory=self.memory,
+            )
+            try:
+                result = await Runner.run(agent, input=npc_input, max_turns=2)
+                response = result.final_output.strip()
+                if response and response.lower() != "<silent>":
+                    self.npc_store.append_history(name, "user", "[时间流逝]")
+                    self.npc_store.append_history(name, "assistant", response)
+                    self.npc_store.save_state(name)
+                    return f"{name}: {response}"
+                return None
+            except Exception:
+                return None
+
+        async def _run_all():
+            tasks = [_tick_one(name) for name in self.scene_npcs]
+            results = await _asyncio.gather(*tasks, return_exceptions=True)
+            lines = []
+            for r in results:
+                if isinstance(r, str) and r:
+                    lines.append(r)
+            return "\n".join(lines)
+
+        try:
+            loop = _asyncio.get_event_loop()
+            if loop.is_running():
+                # We're inside an async context — use run_coroutine_threadsafe or just return empty
+                self._debug("[Orch] Tick 跳过——异步事件循环已在运行")
+                return ""
+            return _asyncio.run(_run_all())
+        except RuntimeError:
+            return _asyncio.run(_run_all())
+
+    # ===================================================================
     #  Public API
     # ===================================================================
 
@@ -589,6 +811,10 @@ class GameMaster:
         str
             GM's reply text.
         """
+        # ---- Multi-agent mode: Orchestrator → Judge+NPC → Narrator ----
+        if not self.legacy_mode and self._orchestrator_agent is not None:
+            return self._process_multi_agent(user_input)
+
         user_input = user_input.strip()
         if not user_input:
             return "请说点什么吧。"

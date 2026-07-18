@@ -122,3 +122,138 @@ def build_npc_input(
     )
 
     return "\n".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# NPC event input builder (broadcast + tick)
+# ---------------------------------------------------------------------------
+
+def build_npc_event_input(
+    event: str,
+    npc_name: str,
+    npc_state: dict,
+    scene: str,
+    memory=None,
+) -> str:
+    """Build input for an NPC deciding whether/how to respond to an event.
+
+    Unlike build_npc_input which is for explicit player→NPC dialogue,
+    this is for broadcast/tick events where the NPC autonomously chooses
+    whether to speak, act, or stay silent.
+
+    Parameters
+    ----------
+    event : str
+        Description of what happened.
+    npc_name : str
+        This NPC's name.
+    npc_state : dict
+        Current NPC state: emotion, stamina, hp.
+    scene : str
+        Current scene context.
+    memory :
+        MemoryStore for retrieving relevant memories.
+    """
+    parts: list[str] = []
+
+    # Current state
+    parts.append(f"## 你是 {npc_name}")
+    parts.append(f"当前情绪: {npc_state.get('emotion', 'calm')}")
+    parts.append(f"当前体力: {npc_state.get('stamina', 'fresh')}")
+    parts.append(f"HP: {npc_state.get('hp', '?')}/{npc_state.get('max_hp', '?')}")
+
+    # Scene
+    if scene:
+        parts.append(f"\n## 当前场景\n{scene}")
+
+    # Relevant memories
+    if memory:
+        try:
+            memories = memory.npc_full_retrieve(npc_name, event, n=3)
+            if memories:
+                mem_text = "\n".join(
+                    f"- {m['content']}" if isinstance(m, dict) else f"- {m}"
+                    for m in memories
+                )
+                parts.append(f"\n## 相关记忆\n{mem_text}")
+        except Exception:
+            pass
+
+    # The event
+    parts.append(f"\n## 发生了什么事\n{event}")
+
+    # Decision prompt
+    parts.append(
+        "\n根据你的性格、当前情绪、以及和玩家的关系，你如何回应这件事？\n"
+        "你可以选择：\n"
+        "- 说话回应（用对话+动作描述）\n"
+        "- 只做动作不说话（用动作描述）\n"
+        "- 完全沉默（只回复 <silent>）\n\n"
+        "如果你决定沉默，请只回复 <silent>。\n"
+        "如果你决定回应，直接写你的对话和动作，不需要JSON格式。"
+    )
+
+    return "\n".join(parts)
+
+
+def build_npc_tick_input(
+    npc_name: str,
+    npc_state: dict,
+    scene: str,
+    turns_since_last_action: int,
+    memory=None,
+) -> str:
+    """Build input for an NPC's autonomous tick — time passes, what do you do?
+
+    Called every N turns (default 3) for each NPC in the scene.
+
+    Parameters
+    ----------
+    npc_name : str
+        This NPC's name.
+    npc_state : dict
+        Current NPC state.
+    scene : str
+        Current scene context.
+    turns_since_last_action : int
+        How many turns since this NPC last acted or spoke.
+    memory :
+        MemoryStore for retrieving relevant memories.
+    """
+    parts: list[str] = []
+
+    parts.append(f"## 你是 {npc_name}")
+    parts.append(f"当前情绪: {npc_state.get('emotion', 'calm')}")
+    parts.append(f"当前体力: {npc_state.get('stamina', 'fresh')}")
+    parts.append(f"HP: {npc_state.get('hp', '?')}/{npc_state.get('max_hp', '?')}")
+
+    if scene:
+        parts.append(f"\n## 当前场景\n{scene}")
+
+    if memory:
+        try:
+            memories = memory.npc_full_retrieve(npc_name, "", n=2)
+            if memories:
+                mem_text = "\n".join(
+                    f"- {m['content']}" if isinstance(m, dict) else f"- {m}"
+                    for m in memories
+                )
+                parts.append(f"\n## 最近发生的事情\n{mem_text}")
+        except Exception:
+            pass
+
+    # Time passage
+    parts.append(f"\n## 时间流逝\n距离你上次有所行动已经过了 {turns_since_last_action} 个回合。")
+
+    # Decision
+    parts.append(
+        "你此刻在做什么？你想继续手头的事，还是有什么新的动作？\n"
+        "你可以选择：\n"
+        "- 做一个小动作（如巡视、擦杯子、整理货架）→ 描述动作\n"
+        "- 主动和玩家说话 → 写对话+动作\n"
+        "- 离开当前场景 → 描述离开\n"
+        "- 什么都不做 → 回复 <silent>\n\n"
+        "如果你觉得没什么特别的事，回复 <silent> 即可。"
+    )
+
+    return "\n".join(parts)
