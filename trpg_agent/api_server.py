@@ -19,13 +19,30 @@ load_dotenv()
 # 显式禁用 ChromaDB 遥测（必须在 import chromadb 之前设置）
 os.environ.setdefault("ANONYMIZED_TELEMETRY", "False")
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 from trpg_agent.game_master import GameMaster
 from trpg_agent.event_stream import StatusEvent
+
+# ------------------------------------------------------------------
+#  Auth
+# ------------------------------------------------------------------
+
+_API_TOKEN = os.environ.get("TRPG_API_TOKEN", "")
+_auth_scheme = HTTPBearer(auto_error=False)
+
+
+def _require_auth(credentials: HTTPAuthorizationCredentials | None = Depends(_auth_scheme)) -> None:
+    """If TRPG_API_TOKEN is set, require Bearer token match on all endpoints."""
+    if not _API_TOKEN:
+        return  # auth disabled — open access for local dev
+    if credentials is None or credentials.credentials != _API_TOKEN:
+        raise HTTPException(status_code=401, detail="Unauthorized: invalid or missing API token")
+
 
 # ------------------------------------------------------------------
 #  App
@@ -66,11 +83,22 @@ def _get_gm() -> GameMaster:
 
 
 # ------------------------------------------------------------------
+#  Health check
+# ------------------------------------------------------------------
+
+
+@app.get("/health")
+async def health():
+    """Health check — no auth required."""
+    return {"status": "ok", "auth_enabled": bool(_API_TOKEN)}
+
+
+# ------------------------------------------------------------------
 #  Startup
 # ------------------------------------------------------------------
 
 @app.post("/api/start")
-async def api_start(body: dict = {}):
+async def api_start(body: dict = {}, auth=Depends(_require_auth)):
     """开始新游戏。支持自定义世界观和NPC。"""
     try:
         # 开新游戏：销毁旧 GM 实例，清空记忆库，重建全新 GM
@@ -107,7 +135,7 @@ async def api_start(body: dict = {}):
 
 
 @app.post("/api/load")
-async def api_load():
+async def api_load(auth=Depends(_require_auth)):
     """加载存档。"""
     try:
         gm = _get_gm()
@@ -124,7 +152,7 @@ async def api_load():
 
 
 @app.post("/api/save")
-async def api_save():
+async def api_save(auth=Depends(_require_auth)):
     """保存游戏。"""
     try:
         gm = _get_gm()
@@ -135,7 +163,7 @@ async def api_save():
 
 
 @app.get("/api/status")
-async def api_status():
+async def api_status(auth=Depends(_require_auth)):
     """获取玩家状态。"""
     try:
         gm = _get_gm()
@@ -148,7 +176,7 @@ async def api_status():
 
 
 @app.get("/api/npcs")
-async def api_npcs():
+async def api_npcs(auth=Depends(_require_auth)):
     """获取场景 NPC 列表。"""
     try:
         gm = _get_gm()
@@ -158,7 +186,7 @@ async def api_npcs():
 
 
 @app.get("/api/knowledge")
-async def api_knowledge():
+async def api_knowledge(auth=Depends(_require_auth)):
     """获取知识库条目（简化版，返回最近添加的条目）。"""
     try:
         gm = _get_gm()
@@ -177,7 +205,7 @@ async def api_knowledge():
 
 
 @app.post("/api/command")
-async def api_command(body: dict):
+async def api_command(body: dict, auth=Depends(_require_auth)):
     """执行 ! 命令（如 !npc, !world）。"""
     try:
         gm = _get_gm()
@@ -193,7 +221,7 @@ async def api_command(body: dict):
 # ------------------------------------------------------------------
 
 @app.get("/api/debug")
-async def api_debug():
+async def api_debug(auth=Depends(_require_auth)):
     """获取 GM 调试日志并清空缓冲区。"""
     try:
         gm = _get_gm()
@@ -205,7 +233,7 @@ async def api_debug():
 
 
 @app.post("/api/debug/toggle")
-async def api_debug_toggle():
+async def api_debug_toggle(auth=Depends(_require_auth)):
     """切换调试模式。"""
     try:
         gm = _get_gm()
@@ -220,7 +248,7 @@ async def api_debug_toggle():
 # ------------------------------------------------------------------
 
 @app.post("/api/action")
-async def api_action(body: dict):
+async def api_action(body: dict, auth=Depends(_require_auth)):
     """发送玩家行动，SSE 真流式返回 GM 响应。"""
     action = body.get("action", "")
 
@@ -250,11 +278,40 @@ async def api_action(body: dict):
             "suggestions": gm._last_suggestions or _extract_suggestions(response),
             "state": gm.player_state.to_dict(),
             "npcs": _get_scene_npcs(gm),
+            "gameOverPending": gm._game_over_pending,
+            "gameOverCause": gm._game_over_cause if gm._game_over_pending else "",
         }
         yield f"data: {json.dumps(final, ensure_ascii=False)}\n\n"
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+# ------------------------------------------------------------------
+#  Game over confirmation endpoints
+# ------------------------------------------------------------------
+
+
+@app.post("/api/confirm_game_over")
+async def api_confirm_game_over(auth=Depends(_require_auth)):
+    """Confirm a pending game over — executes actual cleanup."""
+    try:
+        gm = _get_gm()
+        result = gm._confirm_game_over()
+        return {"result": result, "gameOver": gm._game_over}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.post("/api/cancel_game_over")
+async def api_cancel_game_over(auth=Depends(_require_auth)):
+    """Cancel a pending game over — resumes gameplay."""
+    try:
+        gm = _get_gm()
+        result = gm._cancel_game_over()
+        return {"result": result}
+    except Exception as e:
+        return {"error": str(e)}
 
 
 # ------------------------------------------------------------------

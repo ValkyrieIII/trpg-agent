@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
-import { useGameStore, KnowledgeEntry } from '../store/gameStore'
+import { useGameStore, KnowledgeEntry } from '../store/gameStore';
+import { apiFetch, apiPost, apiGet } from '../api';
 
 interface ModalKnowledgeProps {
   onClose: () => void
@@ -13,7 +14,7 @@ export default function ModalKnowledge({ onClose }: ModalKnowledgeProps) {
   const [filterCategory, setFilterCategory] = useState('')
 
   useEffect(() => {
-    fetch('/api/knowledge')
+    apiGet('/api/knowledge')
       .then((r) => r.json())
       .then((data) => {
         if (data.knowledge) {
@@ -34,7 +35,7 @@ export default function ModalKnowledge({ onClose }: ModalKnowledgeProps) {
     setAddResult('')
 
     try {
-      const res = await fetch('/api/command', {
+      const res = await apiPost('/api/command', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ command: `!world ${newKnowledge}` }),

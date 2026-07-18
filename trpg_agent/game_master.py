@@ -126,8 +126,10 @@ class GameMaster:
         self._time_of_day: str = "清晨"
         self._weather: str = "薄雾"
 
-        # -- Game over flag --
+        # -- Game over flag (two-phase: pending → confirm → cleanup) --
         self._game_over: bool = False
+        self._game_over_pending: bool = False
+        self._game_over_cause: str = ""
 
         # -- Previous turn response (for suggestion continuity) --
         self._last_gm_response: str = ""
@@ -519,6 +521,8 @@ class GameMaster:
             history_messages=[],  # don't pass — SDK may leak stale tool_calls to DeepSeek
             llm=self.llm,
             game_over=self._game_over,
+            game_over_pending=self._game_over_pending,
+            game_over_cause=self._game_over_cause,
             debug=self.debug,
             debug_log=[],
             recent_events=list(self._recent_events),
@@ -592,6 +596,13 @@ class GameMaster:
         self._last_user_input = user_input
         from trpg_agent.tools import clear_tool_cache
         clear_tool_cache()
+
+        # ---- Game over confirmation gate ----
+        if self._game_over_pending:
+            if user_input.lower() in ("/confirm", "确认"):
+                return self._confirm_game_over()
+            else:
+                return self._cancel_game_over()
 
         # ---- Command routing: world builder ---- (kept as-is)
         if self.world_builder and user_input.startswith("!"):
@@ -704,6 +715,8 @@ class GameMaster:
         self._time_of_day = game_ctx.time_of_day
         self._weather = game_ctx.weather
         self._game_over = game_ctx.game_over
+        self._game_over_pending = game_ctx.game_over_pending
+        self._game_over_cause = game_ctx.game_over_cause
 
         # ---- Write memory (always persist; the Agent decides what matters via actions) ----
         if not self._game_over and response:
@@ -911,6 +924,8 @@ class GameMaster:
         self._time_of_day = game_ctx.time_of_day
         self._weather = game_ctx.weather
         self._game_over = game_ctx.game_over
+        self._game_over_pending = game_ctx.game_over_pending
+        self._game_over_cause = game_ctx.game_over_cause
 
         if not self._game_over and full_response:
             try:
@@ -1492,6 +1507,59 @@ class GameMaster:
 
     # ------------------------------------------------------------------
     #  Save / Load
+    # ------------------------------------------------------------------
+    #  Game over confirmation (called from process() / API, not from SDK tools)
+    # ------------------------------------------------------------------
+
+    def _confirm_game_over(self) -> str:
+        """Execute actual game-over cleanup after player confirmation."""
+        import glob as _glob
+
+        if not self._game_over_pending:
+            return "没有待确认的游戏结束。"
+
+        # Delete save file
+        if os.path.exists("data/save.json"):
+            os.remove("data/save.json")
+
+        # Clear NPC state files
+        for f in _glob.glob("data/chroma/npcs/*_state.json"):
+            try:
+                os.remove(f)
+            except Exception:
+                pass
+
+        # Clear run-time state
+        self.scene_npcs.clear()
+        self._time_of_day = "黄昏"
+        self._weather = "阴"
+
+        # Clear all memory collections
+        try:
+            all_ids = self.memory._collection.get()["ids"]
+            if all_ids:
+                self.memory._collection.delete(ids=all_ids)
+        except Exception:
+            pass
+        try:
+            all_npc_ids = self.memory._npc_collection.get()["ids"]
+            if all_npc_ids:
+                self.memory._npc_collection.delete(ids=all_npc_ids)
+        except Exception:
+            pass
+
+        self._game_over = True
+        self._game_over_pending = False
+        cause = self._game_over_cause
+        self._game_over_cause = ""
+        return f"游戏结束: {cause}。冒险终结。"
+
+    def _cancel_game_over(self) -> str:
+        """Cancel a pending game-over, resuming normal gameplay."""
+        self._game_over_pending = False
+        self._game_over_cause = ""
+        return "已取消游戏结束。冒险继续。"
+
     # ------------------------------------------------------------------
 
     def save(self, path: str = "data/save.json") -> None:

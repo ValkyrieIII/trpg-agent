@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
-import { useGameStore, NPCInfo } from '../store/gameStore'
+import { useGameStore, NPCInfo } from '../store/gameStore';
+import { apiFetch, apiPost, apiGet } from '../api';
 
 interface ModalNPCProps {
   onClose: () => void
@@ -12,7 +13,7 @@ export default function ModalNPC({ onClose }: ModalNPCProps) {
   const [createResult, setCreateResult] = useState('')
 
   useEffect(() => {
-    fetch('/api/npcs')
+    apiGet('/api/npcs')
       .then((r) => r.json())
       .then((data) => {
         if (data.npcs) setNpcs(data.npcs)
@@ -26,7 +27,7 @@ export default function ModalNPC({ onClose }: ModalNPCProps) {
     setCreateResult('')
 
     try {
-      const res = await fetch('/api/command', {
+      const res = await apiPost('/api/command', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ command: `!npc ${newNpcDesc}` }),

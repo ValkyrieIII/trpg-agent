@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
-import { useGameStore } from '../store/gameStore'
+import { useGameStore } from '../store/gameStore';
+import { apiFetch, apiPost, apiGet } from '../api';
 
 const LOADING_STEPS = [
   '连接 LLM...',
@@ -38,7 +39,7 @@ export default function StartScreen() {
     setError(null)
 
     try {
-      const res = await fetch('/api/start', {
+      const res = await apiPost('/api/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -91,9 +92,7 @@ export default function StartScreen() {
     setError(null)
 
     try {
-      const res = await fetch('/api/load', {
-        method: 'POST',
-      })
+      const res = await apiPost('/api/load')
 
       if (!res.ok) {
         const errText = await res.text()

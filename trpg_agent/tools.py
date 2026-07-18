@@ -445,13 +445,29 @@ def search_memory(ctx: RunContextWrapper[GameContext], query: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Game over tool
+# Game over tool (two-phase: mark pending → confirm/cancel)
 # ---------------------------------------------------------------------------
 
 @function_tool
 def game_over(ctx: RunContextWrapper[GameContext], cause: str) -> str:
-    """End the game (character death, etc.). Full reset."""
+    """Mark the game as ending — requires player confirmation before deletion.
+
+    Sets game_over_pending = True.  The player must explicitly confirm
+    (via /confirm in CLI, or confirm dialog in Web UI) before data is deleted.
+    """
     game_ctx = ctx.context
+    game_ctx.game_over_pending = True
+    game_ctx.game_over_cause = cause
+    return f"游戏即将结束: {cause}。输入 /confirm 确认结束，或任何其他输入取消。"
+
+
+@function_tool
+def confirm_game_over(ctx: RunContextWrapper[GameContext]) -> str:
+    """Execute the actual game-over cleanup after player confirmation."""
+    game_ctx = ctx.context
+
+    if not game_ctx.game_over_pending:
+        return "没有待确认的游戏结束。"
 
     # Delete save file
     if os.path.exists("data/save.json"):
@@ -483,7 +499,20 @@ def game_over(ctx: RunContextWrapper[GameContext], cause: str) -> str:
     except Exception:
         pass
 
-    return f"游戏结束: {cause}"
+    game_ctx.game_over = True
+    game_ctx.game_over_pending = False
+    return f"游戏结束: {game_ctx.game_over_cause}。冒险终结。"
+
+
+@function_tool
+def cancel_game_over(ctx: RunContextWrapper[GameContext]) -> str:
+    """Cancel a pending game-over, resuming normal gameplay."""
+    game_ctx = ctx.context
+    if not game_ctx.game_over_pending:
+        return "没有待确认的游戏结束。"
+    game_ctx.game_over_pending = False
+    game_ctx.game_over_cause = ""
+    return "已取消游戏结束。冒险继续。"
 
 
 # ---------------------------------------------------------------------------

@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
-import { useGameStore, Message } from '../store/gameStore'
+import { useGameStore, Message } from '../store/gameStore';
+import { apiFetch, apiPost, apiGet } from '../api';
 import StatePanel from './StatePanel'
 import ModalNPC from './ModalNPC'
 import ModalKnowledge from './ModalKnowledge'
@@ -11,6 +12,8 @@ export default function GameInterface() {
   const { messages, addMessage, suggestions, setSuggestions, playerState, setPlayerState, npcs, setNpcs, knowledge, setKnowledge, isLoading, setIsLoading, error, setError, streamingText, isStreaming, startStreaming, appendStreaming, stopStreaming, agentStatus, setAgentStatus, currentTool, setCurrentTool } = useGameStore()
   const [inputValue, setInputValue] = useState('')
   const [activeModal, setActiveModal] = useState<ModalType>(null)
+  const [gameOverPending, setGameOverPending] = useState(false)
+  const [gameOverCause, setGameOverCause] = useState('')
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
 
@@ -21,7 +24,7 @@ export default function GameInterface() {
 
   // Fetch player state on mount
   useEffect(() => {
-    fetch('/api/status')
+    apiGet('/api/status')
       .then((r) => r.json())
       .then((data) => {
         if (data.state) setPlayerState(data.state)
@@ -40,7 +43,7 @@ export default function GameInterface() {
     startStreaming()
 
     try {
-      const res = await fetch('/api/action', {
+      const res = await apiPost('/api/action', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action }),
@@ -128,6 +131,12 @@ export default function GameInterface() {
       if (finalData?.npcs) {
         setNpcs(finalData.npcs)
       }
+
+      // Game over confirmation
+      if (finalData?.gameOverPending) {
+        setGameOverPending(true)
+        setGameOverCause(finalData.gameOverCause || '未知原因')
+      }
     } catch (err) {
       stopStreaming()
       setError(err instanceof Error ? err.message : '未知错误')
@@ -141,6 +150,28 @@ export default function GameInterface() {
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
     sendAction(inputValue)
+  }
+
+  const handleConfirmGameOver = async () => {
+    setGameOverPending(false)
+    try {
+      const res = await apiPost('/api/confirm_game_over')
+      const data = await res.json()
+      if (data.result) addMessage('gm', data.result)
+    } catch {
+      setError('确认失败')
+    }
+  }
+
+  const handleCancelGameOver = async () => {
+    setGameOverPending(false)
+    try {
+      const res = await apiPost('/api/cancel_game_over')
+      const data = await res.json()
+      if (data.result) addMessage('gm', data.result)
+    } catch {
+      setError('取消失败')
+    }
   }
 
   return (
@@ -263,6 +294,31 @@ export default function GameInterface() {
       )}
       {activeModal === 'settings' && (
         <ModalSettings onClose={() => setActiveModal(null)} />
+      )}
+
+      {/* Game over confirmation dialog */}
+      {gameOverPending && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div className="decorative-border p-6 max-w-md mx-4 bg-coal-900">
+            <h2 className="text-xl font-serif text-blood-400 mb-3">游戏结束</h2>
+            <p className="text-coal-200 mb-2">{gameOverCause || '角色已死亡'}</p>
+            <p className="text-coal-400 text-sm mb-6">确认后将清空所有存档和记忆，不可恢复。</p>
+            <div className="flex gap-3">
+              <button
+                onClick={handleConfirmGameOver}
+                className="flex-1 py-2 bg-blood-700/30 border border-blood-600 text-blood-300 rounded hover:bg-blood-700/50 transition"
+              >
+                确认结束
+              </button>
+              <button
+                onClick={handleCancelGameOver}
+                className="flex-1 py-2 bg-coal-700 border border-coal-600 text-coal-300 rounded hover:bg-coal-600 transition"
+              >
+                取消
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   )

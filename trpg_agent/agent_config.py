@@ -35,7 +35,9 @@ class GameContext:
     npc_agents: dict[str, Any] = field(default_factory=dict)   # NPC name → Agent (Phase 2)
     history_messages: list[dict[str, str]] = field(default_factory=list)
     llm: Any = None            # legacy LLM instance (for Phase 1 fallback)
-    game_over: bool = False    # mutable flag set by game_over() tool
+    game_over: bool = False    # mutable flag — game truly ended (after confirmation)
+    game_over_pending: bool = False  # game_over tool was called, awaiting confirmation
+    game_over_cause: str = ""        # reason for game over (for confirmation prompt)
     debug: bool = False        # emit per-tool debug entries
     debug_log: list[str] = field(default_factory=list)  # collected debug lines
     recent_events: list[str] = field(default_factory=list)  # last N event summaries (for search_memory)

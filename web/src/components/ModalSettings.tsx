@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react'
-import { useGameStore } from '../store/gameStore'
+import { useGameStore } from '../store/gameStore';
+import { apiFetch, apiPost, apiGet } from '../api';
 
 interface ModalSettingsProps {
   onClose: () => void
@@ -31,7 +32,7 @@ export default function ModalSettings({ onClose }: ModalSettingsProps) {
     if (debugMode) {
       pollingTimer.current = setInterval(async () => {
         try {
-          const res = await fetch('/api/debug')
+          const res = await apiGet('/api/debug')
           const data = await res.json()
           if (data.logs?.length > 0) {
             appendDebugLogs(data.logs)
@@ -53,7 +54,7 @@ export default function ModalSettings({ onClose }: ModalSettingsProps) {
 
   const handleToggleDebug = async () => {
     try {
-      const res = await fetch('/api/debug/toggle', { method: 'POST' })
+      const res = await apiPost('/api/debug/toggle')
       const data = await res.json()
       setDebugMode(data.debug)
       if (data.debug) {
@@ -66,7 +67,7 @@ export default function ModalSettings({ onClose }: ModalSettingsProps) {
 
   const handleSave = async () => {
     try {
-      const res = await fetch('/api/save', { method: 'POST' })
+      const res = await apiPost('/api/save')
       const data = await res.json()
       if (data.error) {
         alert(`保存失败: ${data.error}`)
@@ -81,7 +82,7 @@ export default function ModalSettings({ onClose }: ModalSettingsProps) {
   const handleLoad = async () => {
     try {
       setIsLoading(true)
-      const res = await fetch('/api/load', { method: 'POST' })
+      const res = await apiPost('/api/load')
       const data = await res.json()
       if (data.error) {
         alert(data.error)
