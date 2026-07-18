@@ -690,7 +690,10 @@ async def invoke_judge(
 
     try:
         result = await Runner.run(judge, input=input_text, max_turns=3)
-        return result.final_output
+        output = result.final_output
+        if game_ctx.debug:
+            game_ctx.debug_log.append(f"[Judge] 行动: {action_description[:60]}... → {output[:80]}")
+        return output
     except Exception as e:
         if game_ctx.debug:
             game_ctx.debug_log.append(f"[Judge] 调用失败: {e}")
@@ -730,7 +733,10 @@ async def invoke_narrator(
 
     try:
         result = await Runner.run(narrator, input=input_text, max_turns=1)
-        return result.final_output
+        output = result.final_output
+        if game_ctx.debug:
+            game_ctx.debug_log.append(f"[Narrator] 叙事生成: {len(output)}字符")
+        return output
     except Exception as e:
         if game_ctx.debug:
             game_ctx.debug_log.append(f"[Narrator] 调用失败: {e}")
@@ -814,9 +820,17 @@ async def broadcast_event(
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     lines = []
+    silent_count = 0
     for r in results:
         if isinstance(r, str) and r:
             lines.append(r)
+        else:
+            silent_count += 1
+
+    if game_ctx.debug:
+        game_ctx.debug_log.append(
+            f"[Broadcast] 事件: {event[:50]}... → {len(lines)}人回应, {silent_count}人沉默"
+        )
 
     return "\n".join(lines)
 

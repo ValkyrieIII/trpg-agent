@@ -14,6 +14,9 @@ export default function GameInterface() {
   const [activeModal, setActiveModal] = useState<ModalType>(null)
   const [gameOverPending, setGameOverPending] = useState(false)
   const [gameOverCause, setGameOverCause] = useState('')
+  const [showConsole, setShowConsole] = useState(false)
+  const [consoleLogs, setConsoleLogs] = useState<string[]>([])
+  const consoleEndRef = useRef<HTMLDivElement>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
 
@@ -21,6 +24,29 @@ export default function GameInterface() {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages, streamingText])
+
+  // Poll debug logs when console is open
+  useEffect(() => {
+    if (!showConsole) return
+    const interval = setInterval(async () => {
+      try {
+        const res = await apiGet('/api/debug')
+        const data = await res.json()
+        if (data.logs?.length > 0) {
+          setConsoleLogs((prev) => [...prev, ...data.logs].slice(-500))
+        }
+        if (data.debug) setConsoleLogs((prev) => [...prev, '[系统] 调试模式已开启'].slice(-500))
+      } catch {
+        // silent
+      }
+    }, 1000)
+    return () => clearInterval(interval)
+  }, [showConsole])
+
+  // Auto-scroll console
+  useEffect(() => {
+    consoleEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [consoleLogs])
 
   // Fetch player state on mount
   useEffect(() => {
@@ -189,6 +215,12 @@ export default function GameInterface() {
           <button onClick={() => setActiveModal('settings')} className="btn-secondary text-sm">
             设置
           </button>
+          <button
+            onClick={() => { setShowConsole(!showConsole); if (!showConsole) setConsoleLogs([]) }}
+            className={`btn-secondary text-sm ${showConsole ? 'bg-brass-700/30 border-brass-600 text-brass-300' : ''}`}
+          >
+            控制台
+          </button>
         </div>
       </header>
 
@@ -284,6 +316,44 @@ export default function GameInterface() {
           </div>
         )}
       </div>
+
+      {/* Debug console */}
+      {showConsole && (
+        <div className="border-t border-coal-700 bg-coal-950">
+          <div className="flex items-center justify-between px-4 py-1.5 bg-coal-900 border-b border-coal-800">
+            <span className="text-xs text-coal-400 font-mono">控制台</span>
+            <button
+              onClick={() => setConsoleLogs([])}
+              className="text-xs text-coal-500 hover:text-coal-300"
+            >
+              清空
+            </button>
+          </div>
+          <div className="h-40 overflow-y-auto p-3 font-mono text-xs leading-relaxed">
+            {consoleLogs.length === 0 && (
+              <span className="text-coal-500">等待日志...</span>
+            )}
+            {consoleLogs.map((line, i) => (
+              <div
+                key={i}
+                className={
+                  line.startsWith('[Orch]') ? 'text-brass-400'
+                  : line.startsWith('[Judge]') ? 'text-emerald-400'
+                  : line.startsWith('[Narrator]') ? 'text-sky-400'
+                  : line.startsWith('[NPC]') ? 'text-purple-400'
+                  : line.startsWith('[Broadcast]') ? 'text-amber-400'
+                  : line.startsWith('[ERROR]') || line.includes('失败') ? 'text-blood-400'
+                  : line.startsWith('[状态]') ? 'text-coal-500'
+                  : 'text-coal-300'
+                }
+              >
+                {line}
+              </div>
+            ))}
+            <div ref={consoleEndRef} />
+          </div>
+        </div>
+      )}
 
       {/* Modals */}
       {activeModal === 'npc' && (
